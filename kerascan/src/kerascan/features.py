@@ -1,5 +1,6 @@
 """Explainable image-space geometric proxies, not physical corneal topography."""
 from __future__ import annotations
+from dataclasses import dataclass
 import numpy as np
 import cv2
 
@@ -10,11 +11,61 @@ FEATURE_ORDER = [
  "consecutive_center_drift","missing_ring_fraction","detected_ring_count","angular_coverage",
  "segmentation_confidence","quality_score"]
 
+
+@dataclass(frozen=True)
+class GeometryValidation:
+    valid: bool
+    flags: list[str]
+    direct_coverage: float
+
+
+def validate_geometry(
+    radii: np.ndarray,
+    observed: np.ndarray | None = None,
+    min_direct_coverage: float = 0.0,
+) -> GeometryValidation:
+    """Verify geometry invariants before model-ready feature extraction.
+
+    Missing data remains ``NaN``.  It is never changed to zero just to make a
+    downstream vector shape convenient.
+    """
+    radii = np.asarray(radii, dtype=float)
+    flags: list[str] = []
+    if radii.ndim != 2 or radii.shape[0] < 2 or radii.shape[1] < 1:
+        return GeometryValidation(False, ["insufficient_tracked_geometry"], 0.0)
+    finite = np.isfinite(radii)
+    if np.any(radii[finite] <= 0):
+        flags.append("non_positive_radius")
+    for angle in range(radii.shape[1]):
+        values = radii[:, angle]
+        values = values[np.isfinite(values)]
+        if len(values) > 1 and np.any(np.diff(values) <= 0):
+            flags.append("non_monotonic_ring_order")
+            break
+    if observed is None:
+        direct = float(np.mean(finite))
+    else:
+        observed = np.asarray(observed, dtype=bool)
+        if observed.shape != radii.shape:
+            flags.append("observation_shape_mismatch")
+            direct = 0.0
+        else:
+            direct = float(np.mean(observed))
+    if direct < min_direct_coverage:
+        flags.append("insufficient_direct_observation")
+    if not np.any(np.isfinite(np.diff(radii, axis=0))):
+        flags.append("no_valid_ring_spacing")
+    return GeometryValidation(not flags, sorted(set(flags)), direct)
+
 def _nanmean(x, default=0.0):
     y=np.nanmean(x) if np.any(np.isfinite(x)) else default
     return float(y) if np.isfinite(y) else default
 
-def extract_features(radii: np.ndarray, angles_deg: np.ndarray, center: tuple[float,float], segmentation_confidence: float, quality_score: int) -> dict[str,float]:
+def extract_features(radii: np.ndarray, angles_deg: np.ndarray, center: tuple[float,float], segmentation_confidence: float, quality_score: int,
+                     observed: np.ndarray | None = None, min_direct_coverage: float = 0.0) -> dict[str,float]:
+    validation=validate_geometry(radii,observed,min_direct_coverage)
+    if not validation.valid:
+        raise ValueError("invalid ring geometry: " + ", ".join(validation.flags))
     # Configured capacity is not an observed missing ring: measure missingness only
     # across ring identities which were detected at least once.
     active=np.any(np.isfinite(radii),axis=1)
@@ -25,7 +76,9 @@ def extract_features(radii: np.ndarray, angles_deg: np.ndarray, center: tuple[fl
     outer_scale=_nanmean(radii[-1]) if len(radii) else 1.0
     outer_scale=max(outer_scale,1e-6)
     spacing=np.diff(radii,axis=0)
-    valid_spacing=spacing[np.isfinite(spacing) & (spacing>0)]
+    valid_spacing=spacing[np.isfinite(spacing)]
+    if np.any(valid_spacing <= 0):  # validate_geometry should make this unreachable.
+        raise ValueError("non-positive ring spacing")
     mean_sp=_nanmean(valid_spacing); std_sp=float(np.nanstd(valid_spacing)) if len(valid_spacing) else 0.
     local=np.abs(np.diff(spacing,axis=1)); max_local=float(np.nanmax(local)) if np.any(np.isfinite(local)) else 0.
     n= len(angles_deg); upper=slice(n//4,3*n//4); # image y: lower half inferior

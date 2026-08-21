@@ -59,21 +59,25 @@ def test_small_pattern_inside_large_photograph_is_unggradable():
 
 def test_partial_missing_rings_remain_nan():
     img=ring(occlusion=True); roi=detect_placido_roi(img); seg=TraditionalSegmenter().segment(roi.crop,roi.center_roi,roi.outer_radius_px)
-    scan=radial_scan(seg.mask,roi.center_roi,roi.outer_radius_px,RadialConfig(meridians=180))
-    assert np.any(~np.isfinite(scan.radii))
+    config=RadialConfig(meridians=180)
+    scan=radial_scan(seg.enhanced,roi.center_roi,roi.outer_radius_px,config)
+    tracked=track_rings(scan,radial=config)
+    assert np.any(~np.isfinite(tracked.radii))
 
 def test_duplicate_or_incorrect_ring_numbering_is_removed():
-    raw=np.full((4,12),np.nan); raw[:,0]=[20,25,30,40]; raw[:,1]=[20,25,30,40]
-    scan=RadialResult(raw,np.arange(12)*30,[[],[]],0.)
-    tracked=track_rings(scan)
-    assert tracked.duplicate_removals >= 0 and tracked.radii.shape==raw.shape
+    angles=np.arange(12)*30.; positions=np.arange(5.,50.)
+    candidates=[np.asarray([20.,20.,25.,30.,40.]) for _ in angles]
+    scan=RadialResult(angles,positions,np.zeros((12,len(positions))),np.zeros((12,len(positions))),candidates,
+                      [np.ones(len(row)) for row in candidates],np.asarray([20.,25.,30.,40.]),"provisional_polar_profile",1.,0.)
+    tracked=track_rings(scan,radial=RadialConfig(max_radial_jump_px=6.))
+    assert tracked.duplicate_removals >= len(angles) and tracked.radii.shape==(4,len(angles))
+    assert np.all(np.diff(tracked.radii,axis=0)>0)
 
-def test_unggradable_never_fits_or_classifies(monkeypatch):
-    engine=KerascanEngine(); called={'value':False}
-    def forbidden(*args,**kwargs): called['value']=True; raise AssertionError('classifier should not run')
-    monkeypatch.setattr(engine,'fit_synthetic_baseline',forbidden)
+def test_unggradable_never_fits_or_classifies():
+    engine=KerascanEngine()
     out=engine.analyze(np.zeros((300,300,3),np.uint8))
-    assert out['screening_result']=='UNGRADABLE' and not called['value']
+    assert out['screening_result']=='UNGRADABLE'
+    assert out['classification_performed'] is False
 
 def test_manual_crop_fallback():
     img=ring(); roi=detect_placido_roi(img,ROIConfig(manual_box=(50,50,430,430)))
