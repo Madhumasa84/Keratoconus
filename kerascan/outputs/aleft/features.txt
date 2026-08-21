@@ -1,0 +1,19 @@
+mean_ring_spacing: 9.31296
+std_ring_spacing: 6.66052
+spacing_cv: 0.715188
+max_local_spacing_change: 51
+superior_inferior_asymmetry: 0.411883
+left_right_asymmetry: 0.0722105
+opposite_meridian_difference: 0.920139
+mean_ring_circularity: 0.247408
+mean_ellipse_axis_ratio: 0.573049
+mean_fitted_center_displacement: 29.4586
+consecutive_center_drift: 34.511
+missing_ring_fraction: 0.737821
+detected_ring_count: 7
+angular_coverage: 0.895833
+segmentation_confidence: 0
+quality_score: 100
+
+Result: UNGRADABLE (experimental—not clinically calibrated)
+Quality warnings: excessive_missing_or_broken_rings

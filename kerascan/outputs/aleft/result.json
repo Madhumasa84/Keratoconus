@@ -1,0 +1,84 @@
+{
+  "pipeline_version": "phase1-0.1.0",
+  "original_shape": [
+    653,
+    1154,
+    4
+  ],
+  "original_sha256": "c7dd678f506d6841e6141313ef043db7d8ad47c14d8a1dfa740c589b34cee3c2",
+  "roi": {
+    "box_xyxy": [
+      543,
+      74,
+      787,
+      318
+    ],
+    "center_full": [
+      665.4000244140625,
+      196.20001220703125
+    ],
+    "center_roi": [
+      122.4000244140625,
+      122.20001220703125
+    ],
+    "outer_radius_px": 103.30200576782227,
+    "confidence": 0.95,
+    "method": "hough_radial_ringness"
+  },
+  "quality": {
+    "gradable": false,
+    "quality_score": 88,
+    "flags": [
+      "excessive_missing_or_broken_rings"
+    ],
+    "metrics": {
+      "roi_width_px": 244,
+      "roi_height_px": 244,
+      "resolution_min_side_px": 244,
+      "laplacian_variance": 481.9244893982852,
+      "mean_intensity": 71.90629199140017,
+      "contrast_std": 42.97827699102311,
+      "saturation_fraction": 0.0,
+      "noise_sigma_estimate": 1.4826,
+      "pattern_centring_ratio": 0.9956705497833523,
+      "pattern_radius_fraction": 0.8467377521952645,
+      "ring_pixel_fraction": 0.41636308946893485,
+      "visible_ring_sector_coverage": 1.0,
+      "dark_peripheral_sector_fraction": 0.125,
+      "source_pattern_radius_fraction": 0.3163920544190575,
+      "detected_ring_count": 7.0,
+      "missing_ring_fraction": 0.7378205128205129,
+      "ring_order_change_fraction": 0.35,
+      "ring_tracking_confidence": 0.16437499999999997
+    }
+  },
+  "screening_result": "UNGRADABLE",
+  "message": "recapture required",
+  "experimental_status": "experimental\u2014not clinically calibrated",
+  "classification_skipped": true,
+  "features": {
+    "mean_ring_spacing": 9.312962962962963,
+    "std_ring_spacing": 6.660515809641179,
+    "spacing_cv": 0.7151876192495996,
+    "max_local_spacing_change": 50.999999999999986,
+    "superior_inferior_asymmetry": 0.4118833267051104,
+    "left_right_asymmetry": 0.07221047920633177,
+    "opposite_meridian_difference": 0.9201389459929401,
+    "mean_ring_circularity": 0.24740826082075681,
+    "mean_ellipse_axis_ratio": 0.573049273320674,
+    "mean_fitted_center_displacement": 29.45861735101044,
+    "consecutive_center_drift": 34.51102180895192,
+    "missing_ring_fraction": 0.7378205128205129,
+    "detected_ring_count": 7.0,
+    "angular_coverage": 0.8958333333333334,
+    "segmentation_confidence": 0.0,
+    "quality_score": 100.0
+  },
+  "tracking": {
+    "confidence": 0.16437499999999997,
+    "missing_point_fraction": 0.7378205128205129,
+    "duplicate_removals": 29,
+    "identity_shift_fraction": 0.42053789731051344,
+    "order_change_fraction": 0.35
+  }
+}

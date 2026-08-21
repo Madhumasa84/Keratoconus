@@ -1,0 +1,39 @@
+version: '2.0.0'
+effective_date: '2026-08-21'
+approval_status: provisional_defaults_pending_clinical_approval
+
+keratometry:
+  metric: K2
+  high_threshold_d: 47.0
+
+pachymetry:
+  metric: central_or_thinnest_as_recorded
+  low_threshold_um: 480
+
+cylinder:
+  high_threshold_d: 2.0
+
+inter_eye_asymmetry:
+  k2_diff_threshold_d: 1.5
+
+repeat_policy:
+  required_on_isolated_abnormality: true
+  max_readings: 3
+  min_readings_for_final: 2
+
+required_fields:
+  - screening_id
+  - age
+  - sex
+  - site
+  - screening_date
+  - operator_id
+  - device_id
+  - consent_recorded
+  - od_image
+  - os_image
+
+disclaimer: >
+  AI-assisted keratoconus screening result. This is not a confirmed diagnosis.
+  Positive, discordant, ungradable or clinically concerning findings require
+  repeat assessment, corneal tomography and qualified clinical review.

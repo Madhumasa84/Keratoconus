@@ -1,0 +1,156 @@
+{
+  "export_generated_at": "2026-08-21T10:20:28.217712+00:00",
+  "disclaimer": "AI-assisted keratoconus screening result. This is not a confirmed diagnosis. Positive, discordant, ungradable or clinically concerning findings require repeat assessment, corneal tomography and qualified clinical review.",
+  "screening": {
+    "screening_id": "DEMO-2026-001",
+    "age": 16,
+    "sex": "Female",
+    "site": "St. Mary School",
+    "screening_date": "2026-08-21",
+    "operator_id": "OP-DEMO",
+    "device_id": "KERASCAN-001",
+    "consent_recorded": true,
+    "overall_result": "PRIORITY_REFERRAL",
+    "referral_priority": "PRIORITY",
+    "protocol_version": "2.0.0",
+    "eyes": [
+      {
+        "laterality": "OD",
+        "eye_result": "SUSPICIOUS",
+        "quality_gradable": true,
+        "quality_score": 58.0,
+        "quality_flags": [
+          "irregular_spacing"
+        ],
+        "roi_method": "hough",
+        "roi_confidence": 0.81,
+        "roi_radius": 188.0,
+        "image_path": null,
+        "pipeline_version": "phase1-0.1.0",
+        "model_version": "synthetic-baseline",
+        "measurements": [
+          {
+            "reading_number": 1,
+            "k1_d": 44.5,
+            "k1_axis": 175,
+            "k2_d": 48.2,
+            "k2_axis": 85,
+            "kmax_d": 51.0,
+            "mean_k_d": 46.3,
+            "pachymetry_um": 462.0,
+            "pachymetry_type": "thinnest",
+            "sphere_d": -3.0,
+            "cylinder_d": 2.75,
+            "cylinder_axis": 80,
+            "refraction_type": "autorefraction",
+            "measurement_quality": "Good"
+          }
+        ],
+        "image_analyses": [
+          {
+            "model_hash": "a1b2c3d4e5f6",
+            "prototype_score": 0.84,
+            "classification_skipped": false,
+            "pipeline_version": "phase1-0.1.0"
+          }
+        ],
+        "decisions": [
+          {
+            "decision_level": "eye",
+            "final_result": "PRIORITY_REFERRAL",
+            "automated_result": "PRIORITY_REFERRAL",
+            "is_overridden": false,
+            "override_by": null,
+            "override_reason": null,
+            "override_original": null
+          }
+        ],
+        "reason_codes": [
+          "IMG_SUSPICIOUS",
+          "K_HIGH",
+          "PACHY_LOW",
+          "CYL_HIGH"
+        ]
+      },
+      {
+        "laterality": "OS",
+        "eye_result": "NORMAL-LIKE",
+        "quality_gradable": true,
+        "quality_score": 74.0,
+        "quality_flags": [],
+        "roi_method": "hough",
+        "roi_confidence": 0.94,
+        "roi_radius": 193.0,
+        "image_path": null,
+        "pipeline_version": "phase1-0.1.0",
+        "model_version": "synthetic-baseline",
+        "measurements": [
+          {
+            "reading_number": 1,
+            "k1_d": 42.5,
+            "k1_axis": 180,
+            "k2_d": 44.1,
+            "k2_axis": 90,
+            "kmax_d": null,
+            "mean_k_d": 43.3,
+            "pachymetry_um": 535.0,
+            "pachymetry_type": "central",
+            "sphere_d": -1.25,
+            "cylinder_d": 0.5,
+            "cylinder_axis": 90,
+            "refraction_type": "autorefraction",
+            "measurement_quality": "Good"
+          }
+        ],
+        "image_analyses": [
+          {
+            "model_hash": "f6e5d4c3b2a1",
+            "prototype_score": 0.21,
+            "classification_skipped": false,
+            "pipeline_version": "phase1-0.1.0"
+          }
+        ],
+        "decisions": [
+          {
+            "decision_level": "eye",
+            "final_result": "SCREEN_NEGATIVE",
+            "automated_result": "SCREEN_NEGATIVE",
+            "is_overridden": false,
+            "override_by": null,
+            "override_reason": null,
+            "override_original": null
+          }
+        ],
+        "reason_codes": []
+      }
+    ],
+    "decisions": [
+      {
+        "decision_level": "child",
+        "final_result": "PRIORITY_REFERRAL",
+        "automated_result": "PRIORITY_REFERRAL",
+        "is_overridden": false
+      },
+      {
+        "decision_level": "eye",
+        "final_result": "PRIORITY_REFERRAL",
+        "automated_result": "PRIORITY_REFERRAL",
+        "is_overridden": false,
+        "override_by": null,
+        "override_reason": null,
+        "override_original": null
+      },
+      {
+        "decision_level": "eye",
+        "final_result": "SCREEN_NEGATIVE",
+        "automated_result": "SCREEN_NEGATIVE",
+        "is_overridden": false,
+        "override_by": null,
+        "override_reason": null,
+        "override_original": null
+      }
+    ],
+    "referrals": [],
+    "pentacam_followups": []
+  }
+}
