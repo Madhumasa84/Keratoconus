@@ -1,6 +1,12 @@
 """Offline operations command: migrate, backup, restore, and local account provision."""
 from __future__ import annotations
-import argparse, os
+import argparse, os, sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from app.services.auth_service import LocalAuthService
 from app.services.operations_service import backup_database, restore_database, storage_health
 
