@@ -6,6 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 
 st.set_page_config(page_title="Search History — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("🔎 Search Screening History")
 
 try:

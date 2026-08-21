@@ -43,6 +43,23 @@ class Base(DeclarativeBase):
     pass
 
 
+class OperatorAccount(Base):
+    """Local role account; password hashes only, never a network identity provider."""
+    __tablename__ = "operator_accounts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    operator_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="operator")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now_utc)
+
+
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now_utc)
+
+
 class Screening(Base):
     __tablename__ = "screenings"
 
@@ -67,7 +84,6 @@ class Screening(Base):
     eyes: Mapped[list[Eye]] = relationship("Eye", back_populates="screening", cascade="all, delete-orphan")
     decisions: Mapped[list[Decision]] = relationship("Decision", back_populates="screening", cascade="all, delete-orphan")
     referrals: Mapped[list[Referral]] = relationship("Referral", back_populates="screening", cascade="all, delete-orphan")
-    pentacam_followups: Mapped[list[PentacamFollowup]] = relationship("PentacamFollowup", back_populates="screening", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Screening screening_id={self.screening_id!r} result={self.overall_result!r}>"
@@ -209,26 +225,6 @@ class Referral(Base):
 
     def __repr__(self) -> str:
         return f"<Referral screening_id={self.screening_id!r} priority={self.referral_priority!r}>"
-
-
-class PentacamFollowup(Base):
-    __tablename__ = "pentacam_followup"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
-    screening_id: Mapped[str] = mapped_column(String(36), ForeignKey("screenings.id", ondelete="CASCADE"), nullable=False, index=True)
-    exam_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    kmax_od: Mapped[float | None] = mapped_column(Float, nullable=True)
-    kmax_os: Mapped[float | None] = mapped_column(Float, nullable=True)
-    belin_ambrosio_d_od: Mapped[float | None] = mapped_column(Float, nullable=True)
-    belin_ambrosio_d_os: Mapped[float | None] = mapped_column(Float, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    performed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now_utc)
-
-    screening: Mapped[Screening] = relationship("Screening", back_populates="pentacam_followups")
-
-    def __repr__(self) -> str:
-        return f"<PentacamFollowup screening_id={self.screening_id!r} exam_date={self.exam_date!r}>"
 
 
 class AuditLog(Base):

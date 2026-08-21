@@ -26,7 +26,7 @@ def test_full_e2e_screening_with_real_images(db_session, tmp_path):
     Test complete end-to-end workflow:
     Form validation -> Phase 1 engine analysis on real Placido images ->
     Referral rule execution -> SQLite persistence -> PDF/JSON/Excel exports ->
-    Clinician override -> Pentacam follow-up -> CSV audit export.
+    Clinician override -> CSV audit export.
     """
     assert SAMPLE_OD.exists(), f"Sample OD image not found at {SAMPLE_OD}"
     assert SAMPLE_OS.exists(), f"Sample OS image not found at {SAMPLE_OS}"
@@ -149,13 +149,13 @@ def test_full_e2e_screening_with_real_images(db_session, tmp_path):
     with open(exports["json"]) as jf:
         jdata = json.load(jf)
         assert jdata["screening"]["screening_id"] == "E2E-REAL-001"
-        assert "AI-assisted keratoconus screening result" in jdata["disclaimer"]
+        assert "further corneal evaluation is recommended" in jdata["disclaimer"]
 
     # 5. Clinician Override Flow
     child_decision_id = full_record["decisions"][0]["id"]
     override_valid, errors = audit_service.validate_override_request({
         "user_identity": "dr_cornea",
-        "reason": "Comprehensive corneal tomography confirms advanced ectatic change.",
+        "reason": "Qualified clinician reviewed screening findings and recommends priority referral.",
         "original_decision": "RECAPTURE_REQUIRED",
         "new_decision": "PRIORITY_REFERRAL",
         "timestamp": "2026-08-21T15:00:00Z",
@@ -166,7 +166,7 @@ def test_full_e2e_screening_with_real_images(db_session, tmp_path):
         decision_id=child_decision_id,
         original_result="RECAPTURE_REQUIRED",
         new_result="PRIORITY_REFERRAL",
-        reason="Comprehensive corneal tomography confirms advanced ectatic change.",
+        reason="Qualified clinician reviewed screening findings and recommends priority referral.",
         performed_by="dr_cornea",
         timestamp="2026-08-21T15:00:00Z",
         session=session,
@@ -178,31 +178,16 @@ def test_full_e2e_screening_with_real_images(db_session, tmp_path):
     trail = audit_service.get_audit_trail(child_decision_id, session)
     assert len(trail) >= 2
 
-    # 6. Pentacam Follow-Up Recording
-    followup_id = repo.save_pentacam_followup({
-        "screening_id": result.screening_uuid,
-        "exam_date": "2026-08-21",
-        "kmax_od": 51.5,
-        "kmax_os": 44.5,
-        "belin_ambrosio_d_od": 4.8,
-        "belin_ambrosio_d_os": 0.9,
-        "performed_by": "Dr. Pentacam Specialist",
-        "notes": "Ectasia OD confirmed; OS normal.",
-    })
-    session.commit()
-    assert followup_id is not None
-
-    # 7. CSV Audit Export
+    # 6. CSV Audit Export
     csv_path = tmp_path / "audit_trail.csv"
     exported_csv = audit_service.export_audit_log("E2E-REAL-001", str(csv_path), session)
     assert Path(exported_csv).exists()
     csv_content = Path(exported_csv).read_text()
     assert "E2E-REAL-001" or "decisions" in csv_content
 
-    # 8. Query & Search Testing
+    # 7. Query & Search Testing
     history = service.get_screening_history("E2E-REAL-001")
     assert history["screening_id"] == "E2E-REAL-001"
-    assert len(history["pentacam_followups"]) == 1
 
     search_res = service.search_screenings("Metro High")
     assert len(search_res) >= 1

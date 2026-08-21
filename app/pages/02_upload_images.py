@@ -1,5 +1,5 @@
 """Page 2 — Upload OD/OS images and review ROI."""
-import sys, hashlib
+import sys, hashlib, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "kerascan" / "src"))
@@ -9,6 +9,8 @@ from PIL import Image
 import numpy as np
 
 st.set_page_config(page_title="Upload Images — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("🖼 Upload OD & OS Images")
 
 st.warning(
@@ -23,7 +25,7 @@ if not st.session_state.get("current_screening"):
 
 screening = st.session_state["current_screening"]
 screening_id = screening.get("screening_id", "unknown")
-img_dir = Path(__file__).parent.parent / "data" / "images" / screening_id
+img_dir = Path(os.environ.get("KERASCAN_LOCAL_IMAGE_DIR", str(Path.home() / ".kerascan" / "images"))) / screening_id
 img_dir.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_TYPES = ["png", "jpg", "jpeg", "bmp", "tiff"]

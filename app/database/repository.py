@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from .models import (
     AuditLog, Decision, Eye, ImageAnalysis,
-    Measurement, PentacamFollowup, Referral, Screening,
+    Measurement, Referral, Screening,
 )
 
 log = logging.getLogger(__name__)
@@ -219,7 +219,6 @@ class ScreeningRepository:
         result["eyes"] = eyes_out
         result["decisions"] = [_row_to_dict(d) for d in screening_row.decisions if d.decision_level == "child"]
         result["referrals"] = [_row_to_dict(r) for r in screening_row.referrals]
-        result["pentacam_followups"] = [_row_to_dict(p) for p in screening_row.pentacam_followups]
         return result
 
     def list_screenings(self, limit: int = 50, offset: int = 0, site: str | None = None,
@@ -258,6 +257,13 @@ class ScreeningRepository:
         stmt = select(Screening.id).where(Screening.screening_id == screening_id)
         return self._s.scalars(stmt).first() is not None
 
+    def list_recoverable_screenings(self, limit: int = 100) -> list[dict]:
+        """Find local encounters needing recapture/manual continuation after failed analysis."""
+        stmt = (select(Screening).join(Eye).where(
+            or_(Eye.eye_result == "UNGRADABLE", Screening.overall_result.in_(("RECAPTURE_REQUIRED", "MANUAL_REVIEW", "INCOMPLETE")))
+        ).distinct().order_by(Screening.updated_at.desc()).limit(limit))
+        return [_row_to_dict(row) for row in self._s.scalars(stmt).all()]
+
     # ------------------------------------------------------------------
     # Referral
     # ------------------------------------------------------------------
@@ -271,21 +277,6 @@ class ScreeningRepository:
         self._s.flush()
         self.log_audit("referrals", row.id, "INSERT", None, _row_to_dict(row), "system")
         log.debug("save_referral: id=%s", row.id)
-        return row.id
-
-    # ------------------------------------------------------------------
-    # Pentacam follow-up
-    # ------------------------------------------------------------------
-
-    def save_pentacam_followup(self, followup_data: dict) -> str:
-        """Persist a Pentacam follow-up record. Returns new id."""
-        data = {k: v for k, v in followup_data.items()
-                if k not in ("id", "created_at") and hasattr(PentacamFollowup, k)}
-        row = PentacamFollowup(**data)
-        self._s.add(row)
-        self._s.flush()
-        self.log_audit("pentacam_followup", row.id, "INSERT", None, _row_to_dict(row), "system")
-        log.debug("save_pentacam_followup: id=%s", row.id)
         return row.id
 
     # ------------------------------------------------------------------

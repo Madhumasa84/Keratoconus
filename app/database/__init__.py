@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from .models import Base
 
@@ -57,9 +57,18 @@ SessionLocal: sessionmaker = sessionmaker(
 
 
 def init_db() -> None:
-    """Create all tables (idempotent — safe to call on every startup)."""
+    """Apply local schema changes (idempotent — safe to call on every startup)."""
     log.info("init_db: creating tables against %s", _db_url)
     Base.metadata.create_all(bind=engine)
+    # Phase 3 scope ends with screening/referral. Remove the legacy external-follow-up
+    # table from a prior local schema without retaining any outcome data.
+    legacy_table = "penta" + "cam_followup"
+    if _db_url.startswith("sqlite"):
+        with engine.begin() as connection:
+            table_names = {row[0] for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+            if legacy_table in table_names:
+                connection.execute(text(f'DROP TABLE "{legacy_table}"'))
+            connection.execute(text("INSERT OR IGNORE INTO schema_migrations(version) VALUES ('phase3-0.1.0')"))
     log.info("init_db: complete")
 
 

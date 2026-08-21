@@ -239,6 +239,7 @@ class AuditService:
             writer.writeheader()
             for row in rows:
                 import json
+                from app.services.privacy import redact_paths
                 writer.writerow({
                     "id": row.id,
                     "table_name": row.table_name,
@@ -246,9 +247,9 @@ class AuditService:
                     "action": row.action,
                     "performed_by": row.performed_by or "",
                     "performed_at": row.performed_at.isoformat() if isinstance(row.performed_at, datetime) else str(row.performed_at),
-                    "old_value": json.dumps(row.old_value) if row.old_value else "",
-                    "new_value": json.dumps(row.new_value) if row.new_value else "",
+                    "old_value": json.dumps(redact_paths(row.old_value)) if row.old_value else "",
+                    "new_value": json.dumps(redact_paths(row.new_value)) if row.new_value else "",
                 })
 
-        log.info("export_audit_log: wrote %d entries to %s", len(rows), output)
+        log.info("export_audit_log: wrote %d entries to local output (path redacted)", len(rows))
         return str(output.resolve())

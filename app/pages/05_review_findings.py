@@ -6,6 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 
 st.set_page_config(page_title="Review Findings — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("🔍 Review Findings")
 
 result = st.session_state.get("analysis_result")
@@ -105,8 +107,7 @@ if child:
 st.divider()
 st.markdown(
     "> ⚠ *AI-assisted keratoconus screening result. This is not a confirmed diagnosis. "
-    "Positive, discordant, ungradable or clinically concerning findings require "
-    "repeat assessment, corneal tomography and qualified clinical review.*"
+    "Suspicious screening result—further corneal evaluation is recommended.*"
 )
 
 st.page_link("pages/06_confirm_report.py", label="→ Operator Confirmation & Export")

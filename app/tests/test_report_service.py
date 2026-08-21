@@ -58,7 +58,6 @@ def minimal_screening_data():
         ],
         "decisions": [{"decision_level": "child", "final_result": "SCREEN_NEGATIVE", "is_overridden": False}],
         "referrals": [],
-        "pentacam_followups": [],
     }
 
 
@@ -107,4 +106,4 @@ def test_generate_all_exports(svc, minimal_screening_data, tmp_path):
 def test_disclaimer_in_json(svc, minimal_screening_data, tmp_path):
     path = svc.generate_json(minimal_screening_data, str(tmp_path / "d.json"))
     content = Path(path).read_text()
-    assert "not a confirmed diagnosis" in content
+    assert "does not diagnose keratoconus" in content

@@ -118,18 +118,6 @@ CREATE TABLE IF NOT EXISTS referrals (
 );
 CREATE INDEX IF NOT EXISTS ix_referrals_screening_id ON referrals (screening_id);
 
-CREATE TABLE IF NOT EXISTS pentacam_followup (
-    id                      CHAR(36) NOT NULL PRIMARY KEY,
-    screening_id            CHAR(36) NOT NULL REFERENCES screenings(id) ON DELETE CASCADE,
-    exam_date               VARCHAR(32),
-    kmax_od                 REAL, kmax_os REAL,
-    belin_ambrosio_d_od     REAL, belin_ambrosio_d_os REAL,
-    notes                   TEXT,
-    performed_by            VARCHAR(128),
-    created_at              DATETIME NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))
-);
-CREATE INDEX IF NOT EXISTS ix_pentacam_followup_screening_id ON pentacam_followup (screening_id);
-
 CREATE TABLE IF NOT EXISTS audit_log (
     id           CHAR(36)   NOT NULL PRIMARY KEY,
     table_name   VARCHAR(128) NOT NULL,

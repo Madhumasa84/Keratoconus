@@ -26,6 +26,19 @@ htmlcov/
 *.sqlite
 *.db
 
+# Confidential local evaluation inputs and generated local-only artefacts
+local_results/
+private_data/
+confidential_data/
+**/*manifest*.csv
+models/*.joblib
+app/data/exports/
+app/data/backups/
+app/data/images/
+*.key
+*.pem
+*.env
+
 .DS_Store
 *.swp
 *.swo

@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "kerascan" / "src")
 import streamlit as st
 
 st.set_page_config(page_title="Analysis — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("🔬 Run Analysis")
 
 for k in ("current_screening", "od_measurements", "os_measurements"):

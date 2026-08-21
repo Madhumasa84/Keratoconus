@@ -6,6 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 
 st.set_page_config(page_title="Measurements — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("📐 Enter Measurements")
 
 if not st.session_state.get("current_screening"):

@@ -235,11 +235,11 @@ class ScreeningService:
             # Strip numpy artifacts for serialisation
             result.pop("_artifacts", None)
             return result
-        except Exception as exc:
-            log.exception("Phase 1 engine analysis failed: %s", exc)
+        except Exception:
+            log.exception("Phase 1 engine analysis failed for a local input (path redacted)")
             return {
                 "screening_result": "UNGRADABLE",
-                "message": f"Engine error: {exc}",
+                "message": "Engine error: local input could not be analysed.",
                 "classification_skipped": True,
                 "quality": {"gradable": False, "quality_score": 0, "flags": ["engine_error"], "metrics": {}},
                 "roi": {},
@@ -355,14 +355,14 @@ class ScreeningService:
         os_meas_final = os_meas_r2 if os_meas_r2 else os_meas_r1
 
         # ── Phase 1 image analysis ───────────────────────────────────
-        log.info("Analysing OD image: %s", od_image_path)
+        log.info("Analysing OD image: <local path redacted>")
         od_engine_raw = self._analyse_image(od_image_path) if od_image_path else {
             "screening_result": "UNGRADABLE", "message": "No OD image provided",
             "quality": {"gradable": False, "quality_score": 0, "flags": [], "metrics": {}},
             "roi": {}, "features": {}, "pipeline_version": "unknown",
         }
 
-        log.info("Analysing OS image: %s", os_image_path)
+        log.info("Analysing OS image: <local path redacted>")
         os_engine_raw = self._analyse_image(os_image_path) if os_image_path else {
             "screening_result": "UNGRADABLE", "message": "No OS image provided",
             "quality": {"gradable": False, "quality_score": 0, "flags": [], "metrics": {}},

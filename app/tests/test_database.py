@@ -12,7 +12,7 @@ def test_init_db_creates_tables(tmp_db):
     tables = {row[0] for row in cursor.fetchall()}
     conn.close()
     required = {"screenings", "eyes", "measurements", "image_analysis",
-                "decisions", "referrals", "pentacam_followup", "audit_log"}
+                "decisions", "referrals", "audit_log"}
     assert required.issubset(tables), f"Missing tables: {required - tables}"
 
 

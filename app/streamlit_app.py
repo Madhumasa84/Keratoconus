@@ -47,6 +47,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 _DEFAULTS = {
     "operator_id":          "",
+    "operator_role":        "",
     "operator_authenticated": False,
     "current_screening":    {},
     "current_step":         1,
@@ -68,8 +69,6 @@ for k, v in _DEFAULTS.items():
 # Sidebar — operator login + navigation
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/4b/Human_eye_diagram-sagittal_view-NEI.jpg/220px-Human_eye_diagram-sagittal_view-NEI.jpg",
-             use_container_width=True, caption="KERASCAN")
     st.title("KERASCAN")
     st.caption(f"Protocol v{_proto_ver}")
 
@@ -85,13 +84,25 @@ with st.sidebar:
         op_pin = st.text_input("PIN", type="password", key="login_pin")
         if st.button("Login", use_container_width=True):
             if op_id.strip() and op_pin.strip():
-                st.session_state["operator_id"] = op_id.strip()
-                st.session_state["operator_authenticated"] = True
+                try:
+                    from app.database import SessionLocal
+                    from app.services.auth_service import LocalAuthService
+                    with SessionLocal() as session:
+                        identity = LocalAuthService(session).authenticate(op_id, op_pin)
+                except Exception:
+                    identity = None
+                if identity:
+                    st.session_state["operator_id"] = identity["operator_id"]
+                    st.session_state["operator_role"] = identity["role"]
+                    st.session_state["operator_authenticated"] = True
+                else:
+                    st.error("Local authentication failed. Ask an administrator to provision an account.")
+                    st.stop()
                 st.rerun()
             else:
                 st.error("Enter both Operator ID and PIN.")
     else:
-        st.success(f"✓ Logged in: {st.session_state['operator_id']}")
+        st.success(f"✓ Logged in: {st.session_state['operator_id']} ({st.session_state['operator_role']})")
         if st.button("Logout", use_container_width=True):
             for k in _DEFAULTS:
                 st.session_state[k] = _DEFAULTS[k]
@@ -103,21 +114,30 @@ with st.sidebar:
     st.caption(f"Protocol version: **{_proto_ver}**")
     if not _db_ok:
         st.error(f"Database error: {_db_err}")
+    else:
+        try:
+            from app.services.operations_service import storage_health
+            health = storage_health(Path.home() / ".kerascan" / "kerascan.db")
+            if health["warning"]:
+                st.warning("Low local storage. Complete or safely stop active work, then free space before further screening.")
+            else:
+                st.caption(f"Local storage free: {health['free_bytes'] // (1024**3)} GB")
+        except Exception:
+            st.warning("Storage health could not be checked; verify local disk space before screening.")
 
 # ---------------------------------------------------------------------------
 # Main page
 # ---------------------------------------------------------------------------
 st.title("👁 KERASCAN — Keratoconus Screening System")
 st.warning(
-    "**AI-assisted screening tool.** Results require clinical validation. "
-    "This is not a confirmed diagnosis. All positive, discordant, or ungradable "
-    "findings must be reviewed by a qualified clinician.",
+    "**AI-assisted screening tool.** Suspicious screening result—further corneal evaluation is recommended. "
+    "This is not a confirmed diagnosis and does not replace qualified clinical assessment.",
     icon="⚠️",
 )
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.info("**Phase 2** — Offline screening application\nBuilt on Phase 1 image engine.")
+    st.info("**Phase 3** — Offline screening application\nBuilt on the Phase 1 image engine.")
 with col2:
     st.info(f"**Protocol Version**\n{_proto_ver}")
 with col3:
@@ -134,9 +154,8 @@ st.markdown("""
 5. **Review** — Per-eye findings with reason codes
 6. **Confirm & Export** — Operator sign-off, PDF/JSON/Excel
 7. **Search History** — Find previous screenings
-8. **Pentacam Follow-Up** — Record tomography results
 
 Use the **sidebar** to navigate between pages.
 """)
 
-st.caption("KERASCAN Phase 2 — Research use only. Not for clinical deployment.")
+st.caption("KERASCAN Phase 3 — Research use only. Offline, no telemetry, and no cloud dependency.")

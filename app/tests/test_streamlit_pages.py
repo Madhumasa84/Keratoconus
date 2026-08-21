@@ -17,8 +17,8 @@ def test_main_app_syntax():
 
 
 def test_all_pages_syntax():
-    """Verify all 8 Streamlit page scripts compile without syntax errors."""
+    """Verify all screening-only Streamlit page scripts compile without syntax errors."""
     pages = list(PAGES_DIR.glob("*.py"))
-    assert len(pages) >= 8
+    assert len(pages) >= 7
     for page in pages:
         py_compile.compile(str(page), doraise=True)

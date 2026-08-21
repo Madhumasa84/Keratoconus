@@ -1,4 +1,4 @@
-version: '2.0.0'
+version: '3.0.0'
 effective_date: '2026-08-21'
 approval_status: provisional_defaults_pending_clinical_approval
 
@@ -35,5 +35,4 @@ required_fields:
 
 disclaimer: >
   AI-assisted keratoconus screening result. This is not a confirmed diagnosis.
-  Positive, discordant, ungradable or clinically concerning findings require
-  repeat assessment, corneal tomography and qualified clinical review.
+  Suspicious screening result—further corneal evaluation is recommended.

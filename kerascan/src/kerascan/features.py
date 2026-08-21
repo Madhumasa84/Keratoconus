@@ -20,6 +20,10 @@ def extract_features(radii: np.ndarray, angles_deg: np.ndarray, center: tuple[fl
     active=np.any(np.isfinite(radii),axis=1)
     radii=radii[active]
     finite=np.isfinite(radii)
+    # Image-space distances are normalised against an observed outer-ring scale.
+    # This keeps acquisition resolution/crop scale from acting as a classifier cue.
+    outer_scale=_nanmean(radii[-1]) if len(radii) else 1.0
+    outer_scale=max(outer_scale,1e-6)
     spacing=np.diff(radii,axis=0)
     valid_spacing=spacing[np.isfinite(spacing) & (spacing>0)]
     mean_sp=_nanmean(valid_spacing); std_sp=float(np.nanstd(valid_spacing)) if len(valid_spacing) else 0.
@@ -42,9 +46,9 @@ def extract_features(radii: np.ndarray, angles_deg: np.ndarray, center: tuple[fl
             axis.append(min(a,b)/max(a,b)); displacements.append(np.hypot(cx-center[0],cy-center[1])); fitted.append((cx,cy))
     drift=[np.hypot(fitted[i][0]-fitted[i-1][0],fitted[i][1]-fitted[i-1][1]) for i in range(1,len(fitted))]
     coverage=np.mean(np.any(finite,axis=0)); detected=int(np.sum(np.mean(finite,axis=1)>0.2))
-    return dict(zip(FEATURE_ORDER,[mean_sp,std_sp,std_sp/max(mean_sp,1e-6),max_local,
+    return dict(zip(FEATURE_ORDER,[mean_sp/outer_scale,std_sp/outer_scale,std_sp/max(mean_sp,1e-6),max_local/outer_scale,
         abs(superior-inferior)/max(mean_sp,1e-6),abs(left-right)/max(mean_sp,1e-6),opp/max(mean_sp,1e-6),
-        _nanmean(circularities),_nanmean(axis),_nanmean(displacements),_nanmean(drift),
+        _nanmean(circularities),_nanmean(axis),_nanmean(displacements)/outer_scale,_nanmean(drift)/outer_scale,
         float(1-np.mean(finite)),float(detected),float(coverage),float(segmentation_confidence),float(quality_score)]))
 
 def feature_vector(features: dict[str,float]) -> np.ndarray:

@@ -8,6 +8,8 @@ import streamlit as st
 from datetime import date
 
 st.set_page_config(page_title="New Screening — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("📋 New Screening")
 st.caption("Complete all required fields before proceeding.")
 

@@ -15,9 +15,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 DISCLAIMER = (
-    "AI-assisted keratoconus screening result. This is not a confirmed diagnosis. "
-    "Positive, discordant, ungradable or clinically concerning findings require "
-    "repeat assessment, corneal tomography and qualified clinical review."
+    "KERASCAN is an initial screening aid and does not diagnose keratoconus. "
+    "Suspicious screening result—further corneal evaluation is recommended."
 )
 
 HUMAN_REASON = {
@@ -53,10 +52,11 @@ class ReportService:
         """Generate complete JSON export. Returns path."""
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
+        from app.services.privacy import redact_paths
         export = {
             "export_generated_at": datetime.now(timezone.utc).isoformat(),
             "disclaimer": DISCLAIMER,
-            "screening": screening_data,
+            "screening": redact_paths(screening_data),
         }
         output.write_text(json.dumps(export, indent=2, default=str), encoding="utf-8")
         log.info("generate_json: wrote %s", output)
@@ -475,36 +475,6 @@ class ReportService:
         story.append(at)
         story.append(Spacer(1, 0.4*cm))
 
-        # Pentacam follow-up
-        story.append(Paragraph("Pentacam / Corneal Tomography Follow-Up", S["section_header"]))
-        pf_list = screening_data.get("pentacam_followups", [])
-        if pf_list:
-            pf = pf_list[0]
-            pf_data = [
-                ["Field", "Value"],
-                ["Exam Date", _safe(pf.get("exam_date"))],
-                ["Kmax OD", _safe(pf.get("kmax_od"))],
-                ["Kmax OS", _safe(pf.get("kmax_os"))],
-                ["Belin-Ambrósio D OD", _safe(pf.get("belin_ambrosio_d_od"))],
-                ["Belin-Ambrósio D OS", _safe(pf.get("belin_ambrosio_d_os"))],
-                ["Performed By", _safe(pf.get("performed_by"))],
-                ["Notes", _safe(pf.get("notes"))],
-            ]
-        else:
-            pf_data = [
-                ["Field", "Value"],
-                ["Exam Date", "[Not yet recorded]"],
-                ["Kmax OD", ""],
-                ["Kmax OS", ""],
-                ["Belin-Ambrósio D OD", ""],
-                ["Belin-Ambrósio D OS", ""],
-                ["Performed By", ""],
-                ["Notes", ""],
-            ]
-        pft = Table(pf_data, colWidths=[5.5*cm, 9.5*cm])
-        pft.setStyle(get_header_table_style())
-        story.append(pft)
-        story.append(Spacer(1, 0.6*cm))
         story.append(HRFlowable(width="100%", thickness=1, color=NAVY))
         story.append(Spacer(1, 0.2*cm))
         story.append(Paragraph(DISCLAIMER, S["disclaimer"]))

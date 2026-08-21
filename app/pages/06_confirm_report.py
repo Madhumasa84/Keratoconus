@@ -1,5 +1,6 @@
 """Page 6 — Operator confirmation, override, and export."""
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -7,6 +8,8 @@ import streamlit as st
 from datetime import datetime, timezone
 
 st.set_page_config(page_title="Confirm & Export — KERASCAN", layout="wide")
+from app.services.ui_security import require_authenticated
+require_authenticated(st)
 st.title("✅ Operator Confirmation & Export")
 
 result = st.session_state.get("analysis_result")
@@ -30,6 +33,8 @@ with tab_accept:
         st.success("Decision accepted and recorded.")
 
 with tab_override:
+    if st.session_state.get("operator_role") not in {"reviewer", "administrator"}:
+        st.info("A locally authenticated reviewer or administrator role is required for overrides.")
     st.warning(
         "**Overriding the automated decision is permanently recorded in the audit log and cannot be undone.** "
         "The original automated decision is always preserved.",
@@ -49,6 +54,8 @@ with tab_override:
 
     if submitted:
         errors = []
+        if st.session_state.get("operator_role") not in {"reviewer", "administrator"}:
+            errors.append("Your local role is not permitted to override a decision.")
         if confirm_op_id.strip() != st.session_state.get("operator_id", ""):
             errors.append("Operator ID does not match. Please re-enter correctly.")
         if len(override_reason.strip()) < 20:
@@ -74,7 +81,7 @@ st.subheader("Export Reports")
 if not st.session_state.get("decision_confirmed"):
     st.info("Confirm or override the decision above before exporting.")
 else:
-    export_dir = Path(__file__).parent.parent / "data" / "exports" / result.screening_id
+    export_dir = Path(os.environ.get("KERASCAN_LOCAL_OUTPUT_DIR", str(Path.home() / ".kerascan" / "outputs"))) / result.screening_id
     export_dir.mkdir(parents=True, exist_ok=True)
 
     try:
