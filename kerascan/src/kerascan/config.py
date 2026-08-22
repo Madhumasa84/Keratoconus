@@ -124,6 +124,10 @@ class GeometryConfig:
     min_coherent_pair_run: int = 2
     min_sector_angular_samples: int = 3
     max_missing_sector_fraction: float = 0.20
+    # Adjacent ring pairs must carry enough direct observation to be measured.
+    # Pairs below that are excluded from the analysis rather than failing the
+    # whole capture; this is how many must survive for a stack to be reportable.
+    min_analysable_ring_pairs: int = 4
     # Engineering-only persistence controls for self-fitted reference
     # residuals. They are not clinical disease thresholds.
     reference_deviation_magnitude_fraction: float = 0.08

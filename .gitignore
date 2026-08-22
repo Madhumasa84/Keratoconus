@@ -45,6 +45,7 @@ app/data/images/
 # synthetic patterns (examples/, sample_images/) belong in this repository.
 normal/
 suspicious/
+\#testing/
 kerascan/outputs/
 verification_outputs/
 **/original_full_resolution.png

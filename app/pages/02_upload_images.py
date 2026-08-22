@@ -42,6 +42,9 @@ image_dir = Path(os.environ.get("KERASCAN_LOCAL_IMAGE_DIR", str(Path.home() / ".
 image_dir.mkdir(parents=True, exist_ok=True)
 analysis_root = image_dir / "analysis"
 ALLOWED_TYPES = ["png", "jpg", "jpeg", "tif", "tiff"]
+# Previews are deliberately modest: a full-width photo per eye pushed the
+# "next step" control below the fold, so operators could not find it.
+PREVIEW_WIDTH_PX = 300
 
 
 _READY_MESSAGE = {
@@ -127,10 +130,24 @@ for column, eye in ((columns[0], "OD"), (columns[1], "OS")):
     with column:
         st.subheader("Right eye (OD)" if eye == "OD" else "Left eye (OS)")
         uploaded = st.file_uploader("Choose image", type=ALLOWED_TYPES, key=f"{eye.lower()}_upload")
-        if uploaded is None:
+        stored_path = st.session_state.get(f"{eye.lower()}_image_path")
+        stored_verification = st.session_state.get(f"{eye.lower()}_image_verification")
+
+        if uploaded is not None:
+            st.image(uploaded, width=PREVIEW_WIDTH_PX)
+            verification = _save_and_verify(uploaded, eye)
+        elif stored_verification is not None and stored_path and Path(stored_path).exists():
+            # Streamlit discards file-uploader widget state when the operator
+            # navigates to another page, so the widget comes back empty even
+            # though this eye's image and its analysis are still held for the
+            # screening. Show what is stored instead of rendering nothing, which
+            # looks like the upload was lost.
+            st.image(stored_path, width=PREVIEW_WIDTH_PX)
+            st.caption("Already uploaded. Choose a file above only if you want to replace it.")
+            verification = stored_verification
+        else:
             continue
-        st.image(uploaded, use_container_width=True)
-        verification = _save_and_verify(uploaded, eye)
+
         if verification is not None:
             _status_text(verification)
 
@@ -157,6 +174,11 @@ else:
             "Uploading a clearer photo is recommended. You can still continue, "
             "but the screening will be recorded as incomplete."
         )
-        st.page_link("pages/03_measurements.py", label="Continue anyway →")
+        label = "Continue anyway →"
     else:
-        st.page_link("pages/03_measurements.py", label="Next: enter measurements →")
+        st.success("Both eyes analysed.")
+        label = "Next: enter measurements →"
+    # A button rather than a bare link: the previous link sat below two photos
+    # and operators did not find it.
+    if st.button(label, type="primary", use_container_width=True):
+        st.switch_page("pages/03_measurements.py")

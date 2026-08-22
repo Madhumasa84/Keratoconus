@@ -271,7 +271,7 @@ def test_upload_page_is_never_a_dead_end_when_an_image_fails(isolated_env, fake_
     assert not at.exception
     assert any("could not be analysed" in w.value for w in at.warning)
     assert any("recorded as incomplete" in w.value for w in at.warning)
-    assert [link.label for link in at.get("page_link")] == ["Continue anyway →"]
+    assert [button.label for button in at.button] == ["Continue anyway →"]
 
 
 def test_upload_images_accepts_two_distinct_images_and_links_to_measurements(isolated_env, fake_engine, sample_images):
@@ -491,3 +491,49 @@ def test_failed_eye_images_are_labelled_as_rejected_not_as_a_result(isolated_env
     # The good eye still gets its normal, un-hedged comparison caption.
     captions = " ".join(c.value for c in at.caption)
     assert "Not a corneal map" in captions
+
+
+def test_uploaded_images_survive_navigating_away_and_back(isolated_env, fake_engine, sample_images):
+    """Leaving the upload page and returning must not look like the upload was lost.
+
+    Streamlit discards file-uploader widget state when the operator navigates to
+    another page, so the widget returns empty. The screening still holds each
+    eye's image and analysis; the page must render that stored state instead of
+    nothing, and must still offer the way forward.
+    """
+    at = _main_app_authed()
+    at.session_state["current_screening"] = _screening_form()
+    at.switch_page("pages/02_upload_images.py").run()
+    at.file_uploader[0].set_value(("od_original.png", sample_images["od_image"].read_bytes(), "image/png"))
+    at.file_uploader[1].set_value(("os_original.png", sample_images["os_image"].read_bytes(), "image/png"))
+    at.run()
+    assert not at.exception
+    assert any("Both eyes analysed" in s.value for s in at.success)
+
+    at.switch_page("pages/03_measurements.py").run()
+    at.switch_page("pages/02_upload_images.py").run()
+    assert not at.exception
+
+    # The uploader itself is empty again, which is Streamlit's behaviour...
+    assert at.file_uploader[0].value is None
+    # ...but the screening state and what the operator sees must both survive.
+    assert at.session_state["od_image_path"]
+    assert at.session_state["od_image_verification"] is not None
+    assert sum("Already uploaded" in c.value for c in at.caption) == 2
+    assert any("Both eyes analysed" in s.value for s in at.success)
+
+
+def test_upload_page_next_control_actually_navigates(isolated_env, fake_engine, sample_images):
+    """The next-step control must be a working button, not a link buried below the photos."""
+    at = _main_app_authed()
+    at.session_state["current_screening"] = _screening_form()
+    at.switch_page("pages/02_upload_images.py").run()
+    at.file_uploader[0].set_value(("od_original.png", sample_images["od_image"].read_bytes(), "image/png"))
+    at.file_uploader[1].set_value(("os_original.png", sample_images["os_image"].read_bytes(), "image/png"))
+    at.run()
+
+    buttons = [b for b in at.button if "Next" in b.label]
+    assert buttons, "a next-step button must be offered once both eyes are ready"
+    buttons[0].click().run()
+    assert not at.exception
+    assert any("Measurements" in t.value for t in at.title)

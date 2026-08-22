@@ -76,6 +76,49 @@ def _detect_peaks(profile: np.ndarray, config: RadialConfig) -> tuple[np.ndarray
     return peaks.astype(int), np.asarray(props.get("prominences", []), dtype=float)
 
 
+def median_count_of(counts: list[int]) -> float:
+    """Typical number of mires a single meridian resolves."""
+    return float(np.median(counts)) if counts else 0.0
+
+
+def _merge_split_reference_peaks(
+    reference: np.ndarray,
+    min_pitch_fraction: float = 0.60,
+) -> np.ndarray:
+    """Collapse reference peaks that sit far closer together than the ring pitch.
+
+    The reference profile is a median across meridians. A decentred or slightly
+    elliptical pattern places each mire at a different radius on each meridian,
+    so its aggregate peak broadens and can split into two. Those phantom slots
+    are the damaging kind of error: individual meridians only ever resolve one
+    of the pair, so the two ring identities end up observed on complementary
+    meridians, adjacent-pair co-observation collapses towards zero, and the
+    full-stack completeness check rejects an otherwise good capture.
+
+    Real mire pitch varies smoothly with radius, so the median gap is a robust
+    scale: any gap far below it indicates one mire counted twice rather than two
+    genuinely adjacent mires.
+    """
+    reference = np.asarray(reference, dtype=float)
+    if reference.size < 3:
+        return reference
+    gaps = np.diff(reference)
+    finite = gaps[np.isfinite(gaps) & (gaps > 0)]
+    if finite.size == 0:
+        return reference
+    threshold = float(np.median(finite)) * min_pitch_fraction
+    if threshold <= 0:
+        return reference
+    merged: list[float] = [float(reference[0])]
+    for value in reference[1:]:
+        if value - merged[-1] < threshold:
+            # One mire resolved twice: keep a single identity at their midpoint.
+            merged[-1] = (merged[-1] + float(value)) / 2.0
+        else:
+            merged.append(float(value))
+    return np.asarray(merged, dtype=float)
+
+
 def radial_scan(
     image: np.ndarray,
     center: tuple[float, float],
@@ -128,10 +171,25 @@ def radial_scan(
             reference = radii[aggregate_peaks]
         count_source = "verified_device_config"
     else:
-        if len(aggregate_peaks) > config.max_rings:
-            strongest = np.argsort(aggregate_strengths)[-config.max_rings:]
-            aggregate_peaks = np.sort(aggregate_peaks[strongest])
-        reference = radii[aggregate_peaks]
+        # Prefer what individual meridians actually resolve over the aggregate
+        # profile. The aggregate is a median across meridians, so a decentred or
+        # elliptical pattern smears each mire across a band of radii and can
+        # split it into two peaks; those phantom identities are then observed on
+        # complementary meridians and destroy adjacent-pair co-observation.
+        # Rays that resolve the typical number of mires give a cleaner ordinal
+        # reference, and no absent ring is invented here.
+        provisional = int(round(median_count_of(counts)))
+        ordinal_rows = [row for row in candidates if len(row) == provisional]
+        reference = None
+        if provisional >= 2 and len(ordinal_rows) >= max(3, int(0.05 * len(candidates))):
+            reference = np.nanmedian(np.asarray(ordinal_rows, dtype=float), axis=0)
+        if reference is None or not np.all(np.isfinite(reference)):
+            if len(aggregate_peaks) > config.max_rings:
+                strongest = np.argsort(aggregate_strengths)[-config.max_rings:]
+                aggregate_peaks = np.sort(aggregate_peaks[strongest])
+            reference = radii[aggregate_peaks]
+        # Guard against any doublet that survives either route.
+        reference = _merge_split_reference_peaks(reference)
         count_source = "provisional_polar_profile"
     median_count = float(np.median(counts)) if counts else 0.0
     order_change = float(np.mean(np.abs(np.asarray(counts, dtype=float) - median_count) > 2.0)) if counts else 1.0

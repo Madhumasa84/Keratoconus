@@ -173,6 +173,7 @@ def compute_geometry(
         suspicious = False
         indeterminate = False
         uncorroborated_pair_maximum = False
+        uncorroborated_only_reasons: list[str] = []
         pair_maximum_features = {
             "SPACING_VARIATION",
             "OPPOSITE_ASYMMETRY",
@@ -185,6 +186,12 @@ def compute_geometry(
             int(summary["maximum_compressed_pair_run"]),
             int(summary["maximum_expanded_pair_run"]),
         ) >= minimum_run
+        # Requiring a coherent multi-pair run only discriminates when the stack
+        # has appreciably more pairs than that run. On a short stack every pair
+        # is significant and the test cannot be satisfied at all, so applying it
+        # there would silently downgrade a real borderline finding to normal --
+        # the one direction a screening aid must never fail in.
+        corroboration_discriminates = (radii.shape[0] - 1) > minimum_run
         for feature_name, bound in getattr(thresholds, "suspicious_bounds", {}).items():
             if legacy_features.get(feature_name, float("-inf")) >= bound:
                 if feature_name in pair_maximum_features and not multiring_supported:
@@ -195,11 +202,38 @@ def compute_geometry(
         if not suspicious:
             for feature_name, bound in getattr(thresholds, "indeterminate_bounds", {}).items():
                 if legacy_features.get(feature_name, float("-inf")) >= bound:
+                    # Pair-maximum features are set by the single worst adjacent
+                    # ring pair. Coverage falls off at both ends of the mire
+                    # pattern -- the innermost rings subtend few pixels and the
+                    # outermost fade into the limbus -- so one patchy edge pair
+                    # can raise the maximum on an otherwise regular eye. Ectasia
+                    # steepens a coherent run of neighbouring pairs, so the same
+                    # corroboration already required for a suspicious call is
+                    # applied here rather than reporting a borderline result on
+                    # one isolated pair.
+                    if (
+                        feature_name in pair_maximum_features
+                        and corroboration_discriminates
+                        and not multiring_supported
+                    ):
+                        # Recorded for transparency but deliberately does not
+                        # escalate: unlike an uncorroborated suspicious-level
+                        # value, which is downgraded to borderline below, a
+                        # borderline-level value on one isolated pair is not
+                        # evidence of anything.
+                        uncorroborated_only_reasons.append(
+                            f"uncorroborated_{feature_name.lower()}"
+                        )
+                        continue
                     indeterminate = True
                     reason_codes.append(f"indeterminate_{feature_name.lower()}")
         if uncorroborated_pair_maximum and not suspicious:
             indeterminate = True
             reason_codes.append("uncorroborated_single_pair_maximum")
+        if not suspicious and not indeterminate:
+            # The capture was regular once isolated single-pair maxima were
+            # discounted; keep why, so the record shows what was set aside.
+            reason_codes.extend(uncorroborated_only_reasons)
         geometry_status = "SUSPICIOUS" if suspicious else "INDETERMINATE" if indeterminate else "NORMAL-LIKE"
         classification_performed = True
 

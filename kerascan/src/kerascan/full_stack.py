@@ -399,6 +399,30 @@ def analyse_full_stack(
             {"angle_degrees": float(angles_deg[angle]), **_state_fractions(ring_states[:, angle])}
         )
 
+    # Which rings and adjacent pairs carry enough direct observation to measure?
+    # A single weak ring -- typically the innermost, which subtends the fewest
+    # pixels -- should not veto an image whose remaining geometry is well
+    # observed. Under-covered pairs are excluded from the analysis rather than
+    # failing it, and their per-pair statistics are dropped below so that a pair
+    # resting on a handful of meridians cannot drive a feature maximum.
+    analysed_rings = [
+        ring for ring in range(ring_count)
+        if (ring_completeness[ring]["observed_fraction"] or 0.0) >= min_direct_coverage
+    ]
+    analysed_ring_set = set(analysed_rings)
+    analysed_pairs = [
+        pair for pair in range(pair_count)
+        if (pair_completeness[pair]["observed_fraction"] or 0.0) >= min_direct_coverage
+        and pair in analysed_ring_set
+        and (pair + 1) in analysed_ring_set
+    ]
+
+    if pair_count:
+        excluded_pairs = np.setdiff1d(np.arange(pair_count), np.asarray(analysed_pairs, dtype=int))
+        if excluded_pairs.size:
+            angular_variation[excluded_pairs] = np.nan
+            angular_range[excluded_pairs] = np.nan
+
     ring_regions = np.array_split(np.arange(ring_count, dtype=int), 3)
     pair_regions = np.array_split(np.arange(pair_count, dtype=int), 3)
     inner = _region_summary("inner", ring_regions[0], pair_regions[0], ring_states, pair_states, angular_variation, angular_range)
@@ -428,10 +452,16 @@ def analyse_full_stack(
         completeness_reasons.append("expected_ring_count_unverified")
     if ring_count_verified and not count_matches:
         completeness_reasons.append("detected_ring_count_mismatch")
-    if any(item["observed_fraction"] < min_direct_coverage for item in ring_completeness):
-        completeness_reasons.append("insufficient_per_ring_direct_coverage")
-    if any(item["observed_fraction"] < min_direct_coverage for item in pair_completeness):
-        completeness_reasons.append("insufficient_per_pair_direct_coverage")
+    # Under-covered rings and pairs are excluded from the analysis, not treated
+    # as a failure of the whole capture. What matters is whether enough adjacent
+    # pairs remain to characterise the stack.
+    min_pairs = int(getattr(config, "min_analysable_ring_pairs", 4)) if config is not None else 4
+    # A stack that only has a few adjacent pairs to begin with cannot be asked
+    # to produce more than it has; the requirement is capped at what exists, so
+    # this rejects poorly observed captures rather than inherently small ones.
+    required_pairs = min(min_pairs, pair_count)
+    if pair_count and len(analysed_pairs) < required_pairs:
+        completeness_reasons.append("insufficient_analysable_ring_pairs")
     if major_sector_missing:
         completeness_reasons.append("major_angular_sector_missing")
     if np.any(~np.isfinite(baseline)):
@@ -471,8 +501,10 @@ def analyse_full_stack(
         "detected_ring_count": detected_ring_count,
         "ring_count_verified": ring_count_verified,
         "classification_performed": False,
-        "analysed_ring_indices": list(range(ring_count)),
-        "analysed_ring_pair_count": pair_count,
+        "analysed_ring_indices": list(analysed_rings),
+        "analysed_ring_pair_indices": list(analysed_pairs),
+        "analysed_ring_pair_count": len(analysed_pairs),
+        "excluded_ring_pair_count": pair_count - len(analysed_pairs),
         "complete_stack_available": complete_stack_available,
         "spacing_matrix_shape": [pair_count, meridians],
         "state_matrix": state_labels,

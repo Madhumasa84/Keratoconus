@@ -221,7 +221,13 @@ def test_missing_middle_ring_invalidates_both_dependent_pairs():
     stack = _analyse(radii)["full_stack_analysis"]
     assert stack["ring_pair_completeness"][2]["observed_fraction"] == 0.0
     assert stack["ring_pair_completeness"][3]["observed_fraction"] == 0.0
-    assert stack["analysed_ring_pair_count"] == radii.shape[0] - 1
+    # The two pairs that straddled the missing ring are excluded from the
+    # analysis rather than counted as analysed-but-empty, so the reported count
+    # states what was genuinely measurable. The completeness vectors stay
+    # full-length so pair indices remain meaningful.
+    assert stack["analysed_ring_pair_indices"] == [0, 1, 4, 5]
+    assert stack["analysed_ring_pair_count"] == (radii.shape[0] - 1) - 2
+    assert len(stack["ring_pair_completeness"]) == radii.shape[0] - 1
 
 
 def test_missing_outer_ring_reduces_outer_and_full_stack_coverage():
