@@ -39,6 +39,17 @@ app/data/images/
 *.pem
 *.env
 
+# Patient imagery and anything derived from it must never be committed.
+# Screening photographs show identifiable periocular skin, iris and lid
+# markings, and the derived crops/overlays inherit that. Only clearly
+# synthetic patterns (examples/, sample_images/) belong in this repository.
+normal/
+suspicious/
+kerascan/outputs/
+verification_outputs/
+**/original_full_resolution.png
+screening_register.xlsx
+
 .DS_Store
 *.swp
 *.swo

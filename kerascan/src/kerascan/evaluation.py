@@ -46,6 +46,7 @@ class EvaluationCase:
     quality_flags: list[str]
     failure_category: str
     source: str = "image"
+    k1_d: float | None = None
     k2_d: float | None = None
     pachymetry_um: float | None = None
     cylinder_d: float | None = None
@@ -102,7 +103,8 @@ def infer_cases(records: list[ManifestRecord], bundle: ModelBundle) -> list[Eval
             results.append(EvaluationCase(record.patient_id, record.eye, record.session_id, record.reference_label,
                 prediction, float(score) if score is not None else None, flags,
                 categorize_failure(record.reference_label, prediction, flags, tracking),
-                k2_d=_float_or_none(record.extras.get("k2_d")), pachymetry_um=_float_or_none(record.extras.get("pachymetry_um")),
+                k1_d=_float_or_none(record.extras.get("k1_d")), k2_d=_float_or_none(record.extras.get("k2_d")),
+                pachymetry_um=_float_or_none(record.extras.get("pachymetry_um")),
                 cylinder_d=_float_or_none(record.extras.get("cylinder_d")), roi_success=bool(roi.get("confidence",0) > 0),
                 outer_ring_radius_fraction=float(source_fraction) if source_fraction is not None else None,
                 angular_coverage=features.get("angular_coverage"), missing_ring_fraction=features.get("missing_ring_fraction"),
@@ -174,34 +176,156 @@ def grouped_bootstrap_ci(cases: list[EvaluationCase], *, iterations: int = 1000,
 
 
 def target_assessment(metrics: dict[str, Any]) -> dict[str, Any]:
-    accuracy = metrics.get("accuracy")
-    sensitivity = metrics.get("sensitivity")
-    achieved = bool(accuracy is not None and accuracy > .95 and sensitivity is not None and sensitivity >= .90)
-    return {"target_accuracy": ">95%", "observed_locked_test_accuracy": accuracy, "target_achieved": "YES" if achieved else "NO",
-            "screening_suitable_by_target": "YES" if achieved else "NO",
-            "reason": None if achieved else "Target is not established; accuracy alone is insufficient and sensitivity must remain adequate."}
+    """Describe evidence without inventing a performance or deployment target.
+
+    Clinical acceptance criteria belong in an approved validation protocol, not
+    in application code.  Even strong locked-test metrics do not automatically
+    establish suitability for school screening.
+    """
+    return {
+        "target_accuracy": None,
+        "observed_locked_test_accuracy": metrics.get("accuracy"),
+        "target_achieved": "NOT_ASSESSED",
+        "screening_suitable_by_target": "NOT_DETERMINED",
+        "reason": (
+            "No hard-coded performance target is applied. Clinical suitability requires "
+            "a prospectively approved validation protocol, confidence intervals, failure-rate "
+            "assessment, and independent clinical review."
+        ),
+    }
 
 
-def screening_system_comparison(cases: list[EvaluationCase]) -> dict[str, Any]:
-    """Compare image-only, quantitative-rule proxy, and combined referral behaviour.
+def screening_system_comparison(
+    cases: list[EvaluationCase], *, referral_engine: Any | None = None
+) -> dict[str, Any]:
+    """Compare image-only, quantitative, and combined screening behaviour.
 
-    Quantitative comparison is omitted rather than imputed when the local manifest
-    lacks K2, pachymetry, or cylinder values.
+    The versioned application referral engine is injected by the local evaluation
+    CLI.  If it is unavailable, or the manifest lacks a complete canonical
+    measurement set, the comparison is omitted rather than guessed from fallback
+    constants.  This function never trains or modifies the image classifier.
     """
     image = metric_summary(cases)
-    measured=[case for case in cases if None not in (case.k2_d,case.pachymetry_um,case.cylinder_d)]
+    if referral_engine is None:
+        unavailable = {
+            "status": "not_evaluable",
+            "reason": "The versioned screening protocol and referral engine were not supplied.",
+        }
+        return {
+            "image_model": image,
+            "measurement_rules": unavailable,
+            "combined_system": unavailable,
+        }
+
+    measured = [
+        case
+        for case in cases
+        if None not in (case.k1_d, case.k2_d, case.pachymetry_um, case.cylinder_d)
+    ]
     if not measured:
-        unavailable={"status":"not_evaluable","reason":"Manifest contains no complete local quantitative measurements."}
-        return {"image_model":image,"measurement_rules":unavailable,"combined_system":unavailable}
-    def q_prediction(case):
-        return "SUSPICIOUS" if case.k2_d >= 47 or case.pachymetry_um <= 480 or abs(case.cylinder_d) >= 2 else "NORMAL-LIKE"
-    rules=[];combined=[]
+        unavailable = {
+            "status": "not_evaluable",
+            "reason": (
+                "Manifest contains no complete canonical K1, K2, pachymetry, and "
+                "cylinder measurement set."
+            ),
+        }
+        return {
+            "image_model": image,
+            "measurement_rules": unavailable,
+            "combined_system": unavailable,
+            "protocol_version": referral_engine.get_protocol_version(),
+            "thresholds": referral_engine.thresholds,
+        }
+
+    rules: list[EvaluationCase] = []
+    combined: list[EvaluationCase] = []
+    combined_outcomes: Counter[str] = Counter()
+    measurement_outcomes: Counter[str] = Counter()
+
+    def prediction_for_result(result: Any) -> str:
+        if result.action == "REFER":
+            return "SUSPICIOUS"
+        if result.decision == "SCREEN_NEGATIVE":
+            return "NORMAL-LIKE"
+        return "UNGRADABLE"
+
     for case in measured:
-        rule=q_prediction(case)
-        rules.append(EvaluationCase(case.patient_id,case.eye,case.session_id,case.reference_label,rule,None,[],"Unknown"))
-        combo="UNGRADABLE" if case.prediction=="UNGRADABLE" else ("SUSPICIOUS" if "SUSPICIOUS" in {case.prediction,rule} else "NORMAL-LIKE")
-        combined.append(EvaluationCase(case.patient_id,case.eye,case.session_id,case.reference_label,combo,case.score,case.quality_flags,case.failure_category))
-    return {"image_model":image,"measurement_rules":metric_summary(rules),"combined_system":metric_summary(combined),"comparison_scope":"per-eye; child-level referral escalation is applied by the configured application rule engine."}
+        measurements = {
+            "k1_d": case.k1_d,
+            "k2_d": case.k2_d,
+            "pachymetry_um": case.pachymetry_um,
+            "cylinder_d": case.cylinder_d,
+        }
+        measurement_result = referral_engine.evaluate_eye(
+            case.eye,
+            "NORMAL-LIKE",
+            measurements,
+            image_status="NORMAL_LIKE",
+        )
+        measurement_outcomes[measurement_result.decision] += 1
+        if measurement_result.flags is None or measurement_result.action == "INCOMPLETE":
+            measurement_prediction = "UNGRADABLE"
+        elif measurement_result.flags.abnormal_measurement_count:
+            # Measurement-only comparison records any abnormal domain as a
+            # positive quantitative signal; the combined matrix still retains
+            # the distinct REPEAT_REQUIRED state for one isolated abnormality.
+            measurement_prediction = "SUSPICIOUS"
+        else:
+            measurement_prediction = "NORMAL-LIKE"
+        rules.append(
+            EvaluationCase(
+                case.patient_id,
+                case.eye,
+                case.session_id,
+                case.reference_label,
+                measurement_prediction,
+                None,
+                [],
+                "Unknown",
+                source="configured_measurement_rules",
+            )
+        )
+
+        image_status = {
+            "NORMAL-LIKE": "NORMAL_LIKE",
+            "SUSPICIOUS": "SUSPICIOUS",
+            "ANALYSIS_BLOCKED": "ANALYSIS_BLOCKED",
+        }.get(case.prediction, "IMAGE_REJECTED")
+        combined_result = referral_engine.evaluate_eye(
+            case.eye,
+            case.prediction,
+            measurements,
+            image_status=image_status,
+        )
+        combined_outcomes[combined_result.decision] += 1
+        combined.append(
+            EvaluationCase(
+                case.patient_id,
+                case.eye,
+                case.session_id,
+                case.reference_label,
+                prediction_for_result(combined_result),
+                case.score,
+                case.quality_flags,
+                case.failure_category,
+                source="configured_combined_screening_matrix",
+            )
+        )
+
+    return {
+        "image_model": image,
+        "measurement_rules": metric_summary(rules),
+        "combined_system": metric_summary(combined),
+        "measurement_outcomes": dict(measurement_outcomes),
+        "combined_outcomes": dict(combined_outcomes),
+        "protocol_version": referral_engine.get_protocol_version(),
+        "thresholds": referral_engine.thresholds,
+        "comparison_scope": (
+            "Per-eye configured screening outcomes; child-level escalation is applied "
+            "by the same versioned application referral engine."
+        ),
+    }
 
 
 def _safe_sheet(workbook: Workbook, name: str):
@@ -209,13 +333,15 @@ def _safe_sheet(workbook: Workbook, name: str):
 
 
 def write_evaluation_outputs(output_dir: str | Path, *, cases: list[EvaluationCase], metrics: dict[str, Any],
-                             confidence_intervals: dict[str, Any], provenance: dict[str, Any]) -> dict[str, str]:
+                             confidence_intervals: dict[str, Any], provenance: dict[str, Any],
+                             referral_engine: Any | None = None) -> dict[str, str]:
     """Write local aggregate outputs only. No raw images or source paths are included."""
     output = ensure_local_output(output_dir)
     assessment = target_assessment(metrics)
+    comparison = screening_system_comparison(cases, referral_engine=referral_engine)
     aggregate = {"evaluation_version": EVALUATION_VERSION, "provenance": provenance, "metrics": metrics,
                  "confidence_intervals_95": confidence_intervals, "target_assessment": assessment,
-                 "screening_system_comparison": screening_system_comparison(cases),
+                 "screening_system_comparison": comparison,
                  "warning": "Do not modify or retune the model based on locked-test results. Any subsequent model must be evaluated on a new untouched test set."}
     aggregate_path = output / "aggregate_metrics.json"; aggregate_path.write_text(json.dumps(aggregate, indent=2, sort_keys=True), encoding="utf-8")
     hash_path = output / "evaluation_manifest_hash.json"; hash_path.write_text(json.dumps(provenance,indent=2,sort_keys=True),encoding="utf-8")
@@ -225,7 +351,8 @@ def write_evaluation_outputs(output_dir: str | Path, *, cases: list[EvaluationCa
     for key, value in metrics.items():
         if key not in {"per_class", "confusion_matrix", "class_distribution", "per_eye_counts", "per_child_counts"}:
             summary.append([key, value if not isinstance(value, (dict, list)) else json.dumps(value)])
-    summary.append(["target_accuracy", assessment["target_accuracy"]]); summary.append(["target_achieved", assessment["target_achieved"]])
+    summary.append(["predefined_performance_target", assessment["target_accuracy"] or "not configured"])
+    summary.append(["automated_suitability_assessment", assessment["screening_suitable_by_target"]])
     for key, interval in confidence_intervals.items(): summary.append([f"{key}_95_ci", json.dumps(interval)])
     cm_sheet = workbook.create_sheet("Confusion Matrix"); cm_sheet.append(["Reference / Prediction", "NORMAL-LIKE", "SUSPICIOUS"])
     cm_sheet.append(["NORMAL", *metrics["confusion_matrix"][0]]); cm_sheet.append(["SUSPICIOUS", *metrics["confusion_matrix"][1]])
@@ -242,7 +369,7 @@ def write_evaluation_outputs(output_dir: str | Path, *, cases: list[EvaluationCa
     failure_path=output/"failure_summary.xlsx"; failures.save(failure_path)
 
     _write_plots(output, cases, metrics)
-    _write_pdf(output / "final_screening_evaluation.pdf", metrics, confidence_intervals, provenance, assessment, counts, screening_system_comparison(cases))
+    _write_pdf(output / "final_screening_evaluation.pdf", metrics, confidence_intervals, provenance, assessment, counts, comparison)
     return {"aggregate_metrics_json":str(aggregate_path),"aggregate_metrics_xlsx":str(wb_path),"confusion_matrix":str(output/"confusion_matrix.png"),
             "roc_curve":str(output/"roc_curve.png"),"precision_recall_curve":str(output/"precision_recall_curve.png"),"calibration_curve":str(output/"calibration_curve.png"),
             "subgroup_metrics":str(subgroup_path),"failure_summary":str(failure_path),"evaluation_manifest_hash":str(hash_path),"final_pdf":str(output/"final_screening_evaluation.pdf")}
@@ -278,6 +405,10 @@ def _write_pdf(path: Path, metrics: dict[str,Any], intervals: dict[str,Any], pro
     story += [Paragraph("Confidence intervals",styles["Heading2"]),Paragraph(json.dumps(intervals,sort_keys=True),styles["BodyText"]),Spacer(1,8)]
     story += [Paragraph("Failure analysis",styles["Heading2"]),Paragraph(json.dumps(dict(failures),sort_keys=True),styles["BodyText"]),Spacer(1,8)]
     story += [Paragraph("Screening-system comparison",styles["Heading2"]),Paragraph(json.dumps(comparison,sort_keys=True),styles["BodyText"]),Spacer(1,8)]
-    story += [Paragraph("Target assessment",styles["Heading2"]),Paragraph(f"Target accuracy: &gt;95%<br/>Observed locked-test accuracy: {assessment.get('observed_locked_test_accuracy')}<br/>Target achieved: {assessment.get('target_achieved')}",styles["BodyText"]),Spacer(1,8)]
+    story += [Paragraph("Evidence assessment",styles["Heading2"]),Paragraph(
+        f"Predefined performance target: not configured<br/>"
+        f"Observed locked-test accuracy: {assessment.get('observed_locked_test_accuracy')}<br/>"
+        f"Automated screening-suitability decision: {assessment.get('screening_suitable_by_target')}<br/>"
+        f"{assessment.get('reason')}", styles["BodyText"]),Spacer(1,8)]
     story += [Paragraph("Field-readiness conclusion",styles["Heading2"]),Paragraph("KERASCAN is intended as a portable initial screening aid. The system identifies children who may require further corneal evaluation. It does not diagnose keratoconus and does not replace tomography or assessment by a qualified clinician.",styles["BodyText"])]
     SimpleDocTemplate(str(path),pagesize=A4,rightMargin=36,leftMargin=36,topMargin=36,bottomMargin=36).build(story)

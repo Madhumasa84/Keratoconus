@@ -53,8 +53,8 @@ _DEFAULTS = {
     "current_step":         1,
     "od_image_path":        "",
     "os_image_path":        "",
-    "od_roi":               None,
-    "os_roi":               None,
+    "od_image_verification": None,
+    "os_image_verification": None,
     "od_measurements":      {},
     "os_measurements":      {},
     "od_measurements_r2":   None,
@@ -128,34 +128,26 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Main page
 # ---------------------------------------------------------------------------
-st.title("👁 KERASCAN — Keratoconus Screening System")
+st.title("👁 KeraScan")
+st.caption("Offline corneal screening aid for school programmes.")
 st.warning(
-    "**AI-assisted screening tool.** Suspicious screening result—further corneal evaluation is recommended. "
-    "This is not a confirmed diagnosis and does not replace qualified clinical assessment.",
+    "Screening aid only — results are not a diagnosis and do not replace clinical assessment.",
     icon="⚠️",
 )
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.info("**Phase 3** — Offline screening application\nBuilt on the Phase 1 image engine.")
-with col2:
-    st.info(f"**Protocol Version**\n{_proto_ver}")
-with col3:
-    db_status = "✅ Connected" if _db_ok else "❌ Error"
-    st.info(f"**Database**\n{db_status}")
-
-st.divider()
 st.markdown("""
-### Workflow
-1. **New Screening** — Enter screening and patient details
-2. **Upload Images** — OD and OS KERASCAN images (operator must label laterality)
-3. **Measurements** — Enter keratometry, pachymetry, refraction values
-4. **Analysis** — Run Phase 1 engine + referral rules
-5. **Review** — Per-eye findings with reason codes
-6. **Confirm & Export** — Operator sign-off, PDF/JSON/Excel
-7. **Search History** — Find previous screenings
+### How it works
+1. **New Screening** — child and site details
+2. **Upload Images** — one photo per eye
+3. **Measurements** — K1, K2, thickness, cylinder
+4. **Analysis** — run the screening
+5. **Findings** — review both eyes
+6. **Confirm & Export** — referral letter and records
 
-Use the **sidebar** to navigate between pages.
+Use the sidebar to move between steps.
 """)
 
-st.caption("KERASCAN Phase 3 — Research use only. Offline, no telemetry, and no cloud dependency.")
+if not _db_ok:
+    st.error(f"Database error: {_db_err}")
+
+st.caption(f"Research use only · offline, no telemetry · protocol {_proto_ver}")

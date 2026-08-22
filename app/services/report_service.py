@@ -1,511 +1,724 @@
-"""
-report_service.py — PDF, JSON, and Excel report generation for KERASCAN.
-
-All output is produced locally; no network access required.
-ReportLab built-in fonts only.
-"""
+"""Local exports and guarded screen-positive referral PDF generation."""
 from __future__ import annotations
 
+import hashlib
+import html
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .protocol import load_protocol
+
 log = logging.getLogger(__name__)
 
 DISCLAIMER = (
-    "KERASCAN is an initial screening aid and does not diagnose keratoconus. "
-    "Suspicious screening result—further corneal evaluation is recommended."
+    "KeraScan is an experimental initial screening aid. This report does not diagnose or "
+    "exclude keratoconus. A screen-positive result indicates that further ophthalmic "
+    "evaluation is recommended outside this application."
 )
 
-HUMAN_REASON = {
-    "IMG_SUSPICIOUS":       "Suspicious Placido pattern",
-    "IMG_UNGRADABLE":       "Image ungradable — recapture required",
-    "K_HIGH":               "Elevated keratometry (K2)",
-    "PACHY_LOW":            "Low corneal thickness (pachymetry)",
-    "CYL_HIGH":             "High cylinder (astigmatism)",
-    "TWO_DOMAIN_ABNORMAL":  "Two or more quantitative domains abnormal",
-    "CLINICAL_SIGN":        "Clinical sign present (e.g. Vogt striae, Fleischer ring)",
-    "INTER_EYE_ASYMMETRY":  "Inter-eye keratometry asymmetry",
-    "REPEAT_REQUIRED":      "Repeat measurement required",
-    "MEASUREMENT_MISSING":  "Required measurement(s) missing",
+MEASUREMENT_REASON_DETAILS = {
+    "K2_ABOVE_46_8_D": ("K2", "k2_d", "Above study threshold"),
+    "PACHYMETRY_BELOW_480_UM": ("Pachymetry", "pachymetry_um", "Below study threshold"),
+    "CYLINDER_MAGNITUDE_ABOVE_1_5_D": ("Cylinder", "cylinder_d", "Above study threshold"),
 }
 
 
-def _safe(val: Any, default: str = "—") -> str:
-    if val is None or val == "":
+def _safe(value: Any, default: str = "—") -> str:
+    if value is None or value == "":
         return default
-    if isinstance(val, float):
-        return f"{val:.2f}"
-    return str(val)
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _paragraph_text(value: Any, default: str = "—") -> str:
+    """Escape all values that will enter ReportLab's XML-like Paragraph syntax."""
+    return html.escape(_safe(value, default), quote=True)
+
+
+def _sha256(path: str | Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 class ReportService:
-    """Generates PDF, JSON, and Excel exports for a KERASCAN screening."""
+    """Generate local JSON/XLSX and a detailed PDF for a true REFER action only."""
+
+    @staticmethod
+    def _is_refer_action(screening_data: dict[str, Any]) -> bool:
+        # A label alone is not sufficient. The persisted final child-level
+        # action must explicitly be REFER before a detailed referral report may
+        # exist.
+        return screening_data.get("overall_action") == "REFER"
+
+    @staticmethod
+    def _eyes_by_laterality(screening_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {str(eye.get("laterality")): eye for eye in screening_data.get("eyes", []) if eye.get("laterality") in {"OD", "OS"}}
+
+    @staticmethod
+    def _latest_measurements(eye: dict[str, Any]) -> dict[str, Any]:
+        measurements = eye.get("measurements") or []
+        if not measurements:
+            return {}
+        return sorted(measurements, key=lambda item: (item.get("reading_number") or 0, item.get("created_at") or ""))[-1]
+
+    @staticmethod
+    def _eye_decision(eye: dict[str, Any]) -> str:
+        decisions = eye.get("decisions") or []
+        if decisions:
+            return str(decisions[-1].get("final_result") or decisions[-1].get("automated_result") or "—")
+        return str(eye.get("per_eye_decision") or "—")
+
+    def _affected_eyes(self, screening_data: dict[str, Any]) -> list[str]:
+        explicit = screening_data.get("affected_eyes")
+        if isinstance(explicit, list):
+            return [eye for eye in explicit if eye in {"OD", "OS"}]
+        referral_decisions = {
+            "HIGH_RISK_SCREEN_POSITIVE",
+            "SCREEN_POSITIVE_IMAGE_ONLY",
+            "DISCORDANT_SCREEN_POSITIVE",
+        }
+        return [
+            eye.get("laterality") for eye in screening_data.get("eyes", [])
+            if self._eye_decision(eye) in referral_decisions and eye.get("laterality") in {"OD", "OS"}
+        ]
 
     # ------------------------------------------------------------------
-    # JSON
+    # JSON / workbook exports
     # ------------------------------------------------------------------
 
-    def generate_json(self, screening_data: dict, output_path: str) -> str:
-        """Generate complete JSON export. Returns path."""
+    def generate_json(self, screening_data: dict[str, Any], output_path: str) -> str:
+        from app.services.privacy import redact_paths
+
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        from app.services.privacy import redact_paths
         export = {
             "export_generated_at": datetime.now(timezone.utc).isoformat(),
             "disclaimer": DISCLAIMER,
             "screening": redact_paths(screening_data),
         }
         output.write_text(json.dumps(export, indent=2, default=str), encoding="utf-8")
-        log.info("generate_json: wrote %s", output)
         return str(output.resolve())
 
-    # ------------------------------------------------------------------
-    # Excel
-    # ------------------------------------------------------------------
-
-    def generate_excel(self, screening_data: dict, output_path: str) -> str:
-        """Generate Excel with 3 sheets: Summary, Measurements, Audit."""
+    def generate_excel(self, screening_data: dict[str, Any], output_path: str) -> str:
         try:
             import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        except ImportError:
-            raise RuntimeError("openpyxl is required for Excel export. Install it with: pip install openpyxl")
+            from openpyxl.styles import Alignment, Font, PatternFill
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            raise RuntimeError("openpyxl is required for local XLSX export.") from exc
 
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
+        workbook = openpyxl.Workbook()
+        summary = workbook.active
+        summary.title = "Summary"
+        summary.append(["KeraScan Screening Record"])
+        summary["A1"].font = Font(bold=True, size=14)
+        for label, value in (
+            ("Anonymous child/study ID", screening_data.get("screening_id")),
+            ("Screening date", screening_data.get("screening_date")),
+            ("Operator ID", screening_data.get("operator_id")),
+            ("Device ID", screening_data.get("device_id")),
+            ("Protocol version", screening_data.get("protocol_version")),
+            ("Child result", screening_data.get("overall_result")),
+            ("Child action", screening_data.get("overall_action")),
+            ("Referral priority", screening_data.get("referral_priority")),
+        ):
+            summary.append([label, _safe(value)])
+        summary.append(["Disclaimer", DISCLAIMER])
+        summary.column_dimensions["A"].width = 30
+        summary.column_dimensions["B"].width = 90
+        summary[summary.max_row][1].alignment = Alignment(wrap_text=True)
 
-        wb = openpyxl.Workbook()
-        navy = "003366"
-        amber = "FF8C00"
-        light_blue = "E8F0FE"
-        light_amber = "FFF3E0"
-        white = "FFFFFF"
-
-        def header_style(cell, bg=navy, fg=white):
-            cell.font = Font(bold=True, color=fg, size=10)
-            cell.fill = PatternFill("solid", fgColor=bg)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        def set_col_widths(ws, widths):
-            for col, w in widths.items():
-                ws.column_dimensions[col].width = w
-
-        thin = Side(style="thin", color="CCCCCC")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        # ── Sheet 1: Summary ────────────────────────────────────────
-        ws1 = wb.active
-        ws1.title = "Summary"
-        ws1.append(["KERASCAN Screening Report"])
-        ws1["A1"].font = Font(bold=True, size=14, color=navy)
-        ws1.append(["Protocol version:", _safe(screening_data.get("protocol_version"))])
-        ws1.append(["Generated:", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")])
-        ws1.append([])
-
-        # Metadata
-        meta_headers = ["Field", "Value"]
-        ws1.append(meta_headers)
-        for cell in ws1[ws1.max_row]:
-            header_style(cell)
-        meta_rows = [
-            ("Screening ID", screening_data.get("screening_id", "")),
-            ("Age", screening_data.get("age", "")),
-            ("Sex", screening_data.get("sex", "")),
-            ("Site / School", screening_data.get("site", "")),
-            ("Screening Date", screening_data.get("screening_date", "")),
-            ("Operator ID", screening_data.get("operator_id", "")),
-            ("Device ID", screening_data.get("device_id", "")),
-            ("Consent Recorded", "Yes" if screening_data.get("consent_recorded") else "No"),
-            ("Overall Result", screening_data.get("overall_result", "")),
-            ("Referral Priority", screening_data.get("referral_priority", "")),
+        measurements = workbook.create_sheet("Simplified Measurements")
+        headers = [
+            "Eye", "K1 flat (D)", "K2 steep (D)", "K2 status",
+            "Pachymetry (µm)", "Pachymetry status", "Cylinder (D)",
+            "Cylinder-magnitude status", "Image status", "Per-eye decision",
         ]
-        for row in meta_rows:
-            ws1.append(list(row))
-            ws1.cell(ws1.max_row, 1).font = Font(bold=True)
-        ws1.append([])
-        ws1.append(["DISCLAIMER:", DISCLAIMER])
-        ws1.cell(ws1.max_row, 1).font = Font(bold=True, color=amber)
-        ws1.cell(ws1.max_row, 2).alignment = Alignment(wrap_text=True)
-        ws1.row_dimensions[ws1.max_row].height = 60
-        set_col_widths(ws1, {"A": 22, "B": 60})
-
-        # ── Sheet 2: Measurements ────────────────────────────────────
-        ws2 = wb.create_sheet("Measurements")
-        meas_headers = [
-            "Eye", "Reading #", "K1 (D)", "K1 Axis (°)",
-            "K2/Steep K (D)", "K2 Axis (°)", "Kmax (D)", "Mean K (D)",
-            "Pachymetry (µm)", "Pachy Type", "Sphere (D)", "Cylinder (D)",
-            "Cyl Axis (°)", "VA (logMAR)", "Refraction Type", "Quality",
-        ]
-        ws2.append(meas_headers)
-        for cell in ws2[1]:
-            header_style(cell)
-
-        for eye in screening_data.get("eyes", []):
-            for m in eye.get("measurements", []):
-                ws2.append([
-                    eye.get("laterality", ""),
-                    _safe(m.get("reading_number")),
-                    _safe(m.get("k1_d")),
-                    _safe(m.get("k1_axis")),
-                    _safe(m.get("k2_d")),
-                    _safe(m.get("k2_axis")),
-                    _safe(m.get("kmax_d")),
-                    _safe(m.get("mean_k_d")),
-                    _safe(m.get("pachymetry_um")),
-                    _safe(m.get("pachymetry_type")),
-                    _safe(m.get("sphere_d")),
-                    _safe(m.get("cylinder_d")),
-                    _safe(m.get("cylinder_axis")),
-                    _safe(m.get("va_logmar")),
-                    _safe(m.get("refraction_type")),
-                    _safe(m.get("measurement_quality")),
-                ])
-        set_col_widths(ws2, {chr(65+i): 14 for i in range(len(meas_headers))})
-        ws2.column_dimensions["A"].width = 6
-
-        # ── Sheet 3: Audit ───────────────────────────────────────────
-        ws3 = wb.create_sheet("Audit Trail")
-        audit_headers = ["Table", "Record ID", "Action", "Performed By", "Timestamp", "Old Value", "New Value"]
-        ws3.append(audit_headers)
-        for cell in ws3[1]:
-            header_style(cell, bg="333333")
-
-        for eye in screening_data.get("eyes", []):
-            for d in eye.get("decisions", []):
-                ws3.append([
-                    "decisions", d.get("id", ""), "INSERT",
-                    "system", d.get("created_at", ""), "", json.dumps(d, default=str)
-                ])
-                if d.get("is_overridden"):
-                    ws3.append([
-                        "decisions", d.get("id", ""), "UPDATE",
-                        d.get("override_by", ""), d.get("override_at", ""),
-                        d.get("override_original", ""),
-                        f"{d.get('override_new', '')} — {d.get('override_reason', '')}",
-                    ])
-
-        set_col_widths(ws3, {"A": 14, "B": 38, "C": 10, "D": 20, "E": 22, "F": 20, "G": 50})
-        ws3.column_dimensions["G"].width = 50
-
-        wb.save(str(output))
-        log.info("generate_excel: wrote %s", output)
+        measurements.append(headers)
+        for cell in measurements[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="003366")
+        for eye in self._eyes_by_laterality(screening_data).values():
+            measurement = self._latest_measurements(eye)
+            flags = self._flags_for_eye(eye, measurement)
+            measurements.append([
+                eye.get("laterality"), _safe(measurement.get("k1_d")), _safe(measurement.get("k2_d")), flags["k2"],
+                _safe(measurement.get("pachymetry_um")), flags["pachymetry"], _safe(measurement.get("cylinder_d")),
+                flags["cylinder"], _safe(eye.get("image_status") or eye.get("eye_result")), self._eye_decision(eye),
+            ])
+        for column in "ABCDEFGHIJ":
+            measurements.column_dimensions[column].width = 23
+        workbook.save(output)
         return str(output.resolve())
 
     # ------------------------------------------------------------------
-    # PDF
+    # Cumulative mass-screening register
     # ------------------------------------------------------------------
 
-    def generate_pdf(self, screening_data: dict, output_path: str) -> str:
-        """Generate a professional 3-page PDF report. Returns path."""
+    REGISTER_HEADERS = (
+        "Screening ID", "Screening date", "Age", "Sex", "Site", "Operator",
+        "Outcome", "Action", "Referral priority", "Affected eye(s)",
+        "OD image", "OD K1", "OD K2", "OD thickness", "OD cylinder", "OD decision",
+        "OS image", "OS K1", "OS K2", "OS thickness", "OS cylinder", "OS decision",
+        "Recorded at",
+    )
+
+    def _register_row(self, screening_data: dict[str, Any]) -> list[Any]:
+        eyes = self._eyes_by_laterality(screening_data)
+        row: list[Any] = [
+            _safe(screening_data.get("screening_id")),
+            _safe(screening_data.get("screening_date")),
+            _safe(screening_data.get("age")),
+            _safe(screening_data.get("sex")),
+            _safe(screening_data.get("site")),
+            _safe(screening_data.get("operator_id")),
+            _safe(screening_data.get("overall_result")),
+            _safe(screening_data.get("overall_action")),
+            _safe(screening_data.get("referral_priority")),
+            ", ".join(self._affected_eyes(screening_data)) or "—",
+        ]
+        for laterality in ("OD", "OS"):
+            eye = eyes.get(laterality, {})
+            measurement = self._latest_measurements(eye)
+            row += [
+                _safe(eye.get("image_status") or eye.get("eye_result")),
+                _safe(measurement.get("k1_d")),
+                _safe(measurement.get("k2_d")),
+                _safe(measurement.get("pachymetry_um")),
+                _safe(measurement.get("cylinder_d")),
+                self._eye_decision(eye),
+            ]
+        row.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+        return row
+
+    def append_to_register(self, screening_data: dict[str, Any], register_path: str | Path) -> str:
+        """Append one row per child to a cumulative mass-screening register.
+
+        Re-exporting the same screening updates its existing row instead of
+        adding a duplicate, so the register stays one row per child across a
+        whole screening camp.
+        """
         try:
-            from reportlab.platypus import (
-                SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-                PageBreak, Image as RLImage, HRFlowable,
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            raise RuntimeError("openpyxl is required for the local screening register.") from exc
+
+        path = Path(register_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            workbook = openpyxl.load_workbook(path)
+            sheet = workbook["Register"] if "Register" in workbook.sheetnames else workbook.active
+        else:
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "Register"
+            sheet.append(list(self.REGISTER_HEADERS))
+            for cell in sheet[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="003366")
+            for index in range(1, len(self.REGISTER_HEADERS) + 1):
+                sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = 18
+
+        row = self._register_row(screening_data)
+        screening_id = row[0]
+        target_row = None
+        for existing in sheet.iter_rows(min_row=2):
+            if existing and str(existing[0].value or "") == screening_id:
+                target_row = existing[0].row
+                break
+        if target_row is None:
+            sheet.append(row)
+        else:
+            for offset, value in enumerate(row):
+                sheet.cell(row=target_row, column=offset + 1, value=value)
+        workbook.save(path)
+        return str(path.resolve())
+
+    # ------------------------------------------------------------------
+    # Detailed referral PDF
+    # ------------------------------------------------------------------
+
+    def _flags_for_eye(self, eye: dict[str, Any], measurement: dict[str, Any]) -> dict[str, str]:
+        codes = set(eye.get("reason_codes") or [])
+        return {
+            "k2": "ABNORMAL" if "K2_ABOVE_46_8_D" in codes else ("MISSING" if measurement.get("k2_d") is None else "WITHIN THRESHOLD"),
+            "pachymetry": "ABNORMAL" if "PACHYMETRY_BELOW_480_UM" in codes else ("MISSING" if measurement.get("pachymetry_um") is None else "WITHIN THRESHOLD"),
+            "cylinder": "ABNORMAL" if "CYLINDER_MAGNITUDE_ABOVE_1_5_D" in codes else ("MISSING" if measurement.get("cylinder_d") is None else "WITHIN THRESHOLD"),
+        }
+
+    @staticmethod
+    def _artifact_manifest(eye: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        manifest = eye.get("analysis_artifacts")
+        if isinstance(manifest, dict):
+            return manifest
+        analyses = eye.get("image_analyses") or []
+        if analyses and isinstance(analyses[-1].get("artifact_manifest"), dict):
+            return analyses[-1]["artifact_manifest"]
+        return {}
+
+    def _verified_report_image(self, eye: dict[str, Any], filename: str) -> Path | None:
+        """Return only an intact de-identified analysis artefact from this eye/run."""
+        record = self._artifact_manifest(eye).get(filename)
+        if not isinstance(record, dict):
+            return None
+        path_value = record.get("path")
+        expected_hash = record.get("sha256")
+        if not path_value or not expected_hash:
+            return None
+        if record.get("eye") not in (None, eye.get("laterality")):
+            return None
+        if record.get("source_image_hash") not in (None, "", eye.get("image_hash")):
+            return None
+        expected_run = eye.get("analysis_provenance_hash")
+        if expected_run and record.get("provenance_hash") != expected_run:
+            return None
+        path = Path(str(path_value))
+        if not path.is_file() or _sha256(path) != expected_hash:
+            return None
+        return path
+
+    @staticmethod
+    def _image_flowable(path: Path, label: str, styles, width_cm: float = 7.0):
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Image as RLImage, KeepTogether, Paragraph, Spacer
+        from PIL import Image as PILImage
+
+        with PILImage.open(path) as image:
+            width, height = image.size
+        draw_width = width_cm * cm
+        draw_height = draw_width * height / max(width, 1)
+        max_height = 8.2 * cm
+        if draw_height > max_height:
+            draw_height = max_height
+            draw_width = draw_height * width / max(height, 1)
+        return KeepTogether([
+            RLImage(str(path), width=draw_width, height=draw_height),
+            Spacer(1, 0.08 * cm),
+            Paragraph(_paragraph_text(label), styles["small"]),
+            Spacer(1, 0.22 * cm),
+        ])
+
+    def _build_natural_reason_sentences(
+        self, affected_eyes: list[str], eyes: dict[str, dict[str, Any]], protocol
+    ) -> list[str]:
+        """Build plain natural sentences from reason codes — no raw feature names exposed."""
+        sentences: list[str] = []
+        for laterality in affected_eyes:
+            eye = eyes[laterality]
+            codes = set(eye.get("reason_codes") or [])
+            measurement = self._latest_measurements(eye)
+            eye_label = "The right eye (OD)" if laterality == "OD" else "The left eye (OS)"
+
+            if "K2_ABOVE_46_8_D" in codes:
+                k2 = measurement.get("k2_d")
+                if k2 is not None:
+                    sentences.append(
+                        f"{eye_label}: the K2 reading was {float(k2):.2f} D, which is above the "
+                        f"configured screening threshold of {protocol.k2_abnormal_above_d:g} D."
+                    )
+
+            if "PACHYMETRY_BELOW_480_UM" in codes:
+                pachy = measurement.get("pachymetry_um")
+                if pachy is not None:
+                    sentences.append(
+                        f"{eye_label}: the pachymetry reading was {float(pachy):.0f} µm, which is below "
+                        f"the configured screening threshold of {protocol.pachymetry_abnormal_below_um:g} µm."
+                    )
+
+            if "CYLINDER_MAGNITUDE_ABOVE_1_5_D" in codes:
+                cyl = measurement.get("cylinder_d")
+                if cyl is not None:
+                    sentences.append(
+                        f"{eye_label}: the cylinder magnitude was {abs(float(cyl)):.2f} D, which is above "
+                        f"the configured screening threshold of {protocol.cylinder_magnitude_abnormal_above_d:g} D."
+                    )
+
+            if "IMAGE_CLASSIFIER_SUSPICIOUS" in codes:
+                sentences.append(
+                    f"{eye_label}: the KeraScan image showed a Placido ring pattern that was classified "
+                    "as suspicious by a provisional, non-clinical geometry-consistency heuristic (not a "
+                    "validated diagnostic classifier)."
+                )
+
+        if sentences:
+            sentences.append(
+                "This result is not a diagnosis. Screening results require interpretation by a qualified "
+                "clinician in the context of the full clinical picture."
             )
+        return sentences
+
+    def _reason_rows(self, affected_eyes: list[str], eyes: dict[str, dict[str, Any]], protocol) -> list[list[str]]:
+        rows: list[list[str]] = []
+        thresholds = {
+            "K2_ABOVE_46_8_D": f">{protocol.k2_abnormal_above_d:g} D",
+            "PACHYMETRY_BELOW_480_UM": f"<{protocol.pachymetry_abnormal_below_um:g} µm",
+            "CYLINDER_MAGNITUDE_ABOVE_1_5_D": f">{protocol.cylinder_magnitude_abnormal_above_d:g} D magnitude",
+        }
+        for laterality in affected_eyes:
+            eye = eyes[laterality]
+            codes = eye.get("reason_codes") or []
+            measurement = self._latest_measurements(eye)
+            if "IMAGE_CLASSIFIER_SUSPICIOUS" in codes:
+                rows.append([
+                    laterality, "KeraScan image", "Suspicious", "—",
+                    "Image pattern classified as suspicious (provisional, non-clinical heuristic)",
+                ])
+            for code, (domain, key, reason) in MEASUREMENT_REASON_DETAILS.items():
+                if code not in codes:
+                    continue
+                value = measurement.get(key)
+                if code == "CYLINDER_MAGNITUDE_ABOVE_1_5_D" and value is not None:
+                    observed = f"{abs(float(value)):.2f} D magnitude"
+                elif code == "PACHYMETRY_BELOW_480_UM" and value is not None:
+                    observed = f"{float(value):.0f} µm"
+                else:
+                    observed = f"{float(value):.2f} D" if value is not None else "—"
+                rows.append([laterality, domain, observed, thresholds[code], reason])
+        return rows
+
+    def _report_identifier(self, screening_data: dict[str, Any], affected_eyes: list[str]) -> str:
+        material = {
+            "screening_id": screening_data.get("screening_id"),
+            "affected_eyes": affected_eyes,
+            "provenance": [
+                (eye.get("laterality"), eye.get("analysis_provenance_hash"), eye.get("image_hash"))
+                for eye in screening_data.get("eyes", []) if eye.get("laterality") in affected_eyes
+            ],
+        }
+        return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16].upper()
+
+    @staticmethod
+    def verify_pdf(path: str | Path) -> bool:
+        """Basic local structural validation without adding a network dependency."""
+        try:
+            payload = Path(path).read_bytes()
+        except OSError:
+            return False
+        return len(payload) > 1000 and payload.startswith(b"%PDF-") and b"%%EOF" in payload[-2048:]
+
+    def generate_pdf(self, screening_data: dict[str, Any], output_path: str) -> str:
+        """Generate the detailed referral PDF only for final child-level REFER."""
+        if not self._is_refer_action(screening_data):
+            raise ValueError("Detailed referral PDFs are generated only when the final child-level action is REFER.")
+        try:
+            from reportlab.lib import colors
             from reportlab.lib.pagesizes import A4
-            from reportlab.lib import colors as rl_colors
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
             from reportlab.lib.units import cm
-        except ImportError:
-            raise RuntimeError("reportlab is required. Install with: pip install reportlab")
+            from reportlab.platypus import (
+                HRFlowable, KeepTogether, LongTable, PageBreak, Paragraph,
+                SimpleDocTemplate, Spacer, Table, TableStyle,
+            )
+        except ImportError as exc:  # pragma: no cover - declared dependency
+            raise RuntimeError("reportlab is required for local PDF generation.") from exc
 
-        from app.templates.report_styles import (
-            get_styles, get_header_table_style, get_measurements_table_style,
-            get_result_table_style, get_audit_table_style,
-            NAVY, AMBER, LIGHT_BLUE, LIGHT_AMBER, WHITE, DARK_GRAY, MID_GRAY, LIGHT_GRAY,
-        )
-
+        protocol = load_protocol()
+        if tuple(protocol.detailed_pdf_for_actions) and "REFER" not in protocol.detailed_pdf_for_actions:
+            raise ValueError("The configured protocol does not allow detailed PDF generation for REFER.")
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
+        eyes = self._eyes_by_laterality(screening_data)
+        affected_eyes = self._affected_eyes(screening_data)
+        if not affected_eyes:
+            raise ValueError("A screen-positive referral PDF requires at least one affected eye.")
+        if any(eye not in eyes for eye in affected_eyes):
+            raise ValueError("Referral PDF eye provenance is incomplete.")
 
-        S = get_styles()
-        proto_ver = _safe(screening_data.get("protocol_version"), "unknown")
-        gen_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        report_id = self._report_identifier(screening_data, affected_eyes)
+        generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        screening_timestamp = _safe(screening_data.get("screening_date"))
+        if "T" not in screening_timestamp and screening_data.get("created_at"):
+            screening_timestamp = f"{screening_timestamp} / recorded {screening_data['created_at']}"
+        stylesheet = getSampleStyleSheet()
+        styles = {
+            "title": ParagraphStyle("KeraTitle", parent=stylesheet["Title"], fontName="Helvetica-Bold", fontSize=17, leading=21, textColor=colors.HexColor("#003366")),
+            "subtitle": ParagraphStyle("KeraSub", parent=stylesheet["Normal"], fontSize=8, leading=11, textColor=colors.HexColor("#444444")),
+            "section": ParagraphStyle("KeraSection", parent=stylesheet["Heading2"], fontName="Helvetica-Bold", fontSize=11, leading=14, textColor=colors.HexColor("#003366"), spaceBefore=8, spaceAfter=5),
+            "normal": ParagraphStyle("KeraNormal", parent=stylesheet["Normal"], fontSize=8.4, leading=11),
+            "small": ParagraphStyle("KeraSmall", parent=stylesheet["Normal"], fontSize=7.3, leading=9),
+            "disclaimer": ParagraphStyle("KeraDisclaimer", parent=stylesheet["Normal"], fontSize=8, leading=10, textColor=colors.HexColor("#5B3D00")),
+        }
 
-        def make_header_footer(canvas, doc):
+        def cell(value: Any, style: str = "normal") -> Paragraph:
+            return Paragraph(_paragraph_text(value), styles[style])
+
+        def table_style(header: bool = True) -> TableStyle:
+            commands = [
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B9C7D4")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+            if header:
+                commands += [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#003366")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ]
+            return TableStyle(commands)
+
+        model_versions = []
+        pipeline_versions = []
+        for eye in eyes.values():
+            if eye.get("model_version"):
+                model_versions.append(str(eye["model_version"]))
+            elif (eye.get("image_analyses") or [{}])[-1].get("model_version"):
+                model_versions.append(str((eye.get("image_analyses") or [{}])[-1]["model_version"]))
+            if eye.get("pipeline_version"):
+                pipeline_versions.append(str(eye["pipeline_version"]))
+        model_version = ", ".join(sorted(set(model_versions))) or "not available"
+        pipeline_version = ", ".join(sorted(set(pipeline_versions))) or "not available"
+        # Short hash prefixes: enough to tie the report to the stored analysis
+        # record, without a wall of hex across the footer. The full hashes stay
+        # in the JSON export and the local database.
+        provenance_summary = "; ".join(
+            f"{eye}: {_safe(eyes[eye].get('analysis_provenance_hash'))[:12]}" for eye in affected_eyes
+        )
+
+        def header_footer(canvas, doc) -> None:
             canvas.saveState()
-            w, h = A4
-            # Header bar
-            canvas.setFillColor(NAVY)
-            canvas.rect(0, h - 1.2*cm, w, 1.2*cm, fill=True, stroke=False)
-            canvas.setFillColor(WHITE)
-            canvas.setFont("Helvetica-Bold", 10)
-            canvas.drawString(1*cm, h - 0.85*cm, "KERASCAN Keratoconus Screening Report")
-            canvas.setFont("Helvetica", 8)
-            canvas.drawRightString(w - 1*cm, h - 0.85*cm, f"Protocol v{proto_ver}  |  {gen_time}")
-            # Footer
-            canvas.setFillColor(MID_GRAY)
+            width, height = A4
+            canvas.setFillColor(colors.HexColor("#003366"))
+            canvas.rect(0, height - 1.1 * cm, width, 1.1 * cm, fill=True, stroke=False)
+            canvas.setFillColor(colors.white)
+            canvas.setFont("Helvetica-Bold", 9)
+            canvas.drawString(1.2 * cm, height - 0.72 * cm, "KeraScan School Corneal Screening Report")
             canvas.setFont("Helvetica", 7)
-            canvas.drawString(1*cm, 0.6*cm, DISCLAIMER[:120] + "...")
-            canvas.drawRightString(w - 1*cm, 0.6*cm, f"Page {doc.page}")
+            canvas.drawRightString(width - 1.2 * cm, height - 0.72 * cm, f"Report ID {report_id}")
+            canvas.setFillColor(colors.HexColor("#555555"))
+            canvas.setFont("Helvetica", 7)
+            canvas.drawString(1.2 * cm, 0.65 * cm, "Experimental initial screening aid — does not diagnose or exclude keratoconus.")
+            canvas.drawRightString(width - 1.2 * cm, 0.65 * cm, f"Page {doc.page}")
             canvas.restoreState()
 
-        doc = SimpleDocTemplate(
-            str(output),
-            pagesize=A4,
-            topMargin=1.8*cm,
-            bottomMargin=1.4*cm,
-            leftMargin=1.5*cm,
-            rightMargin=1.5*cm,
+        story: list[Any] = [
+            Paragraph("KeraScan School Corneal Screening Report", styles["title"]),
+            Paragraph("Initial screening result — not a confirmed diagnosis", styles["subtitle"]),
+            HRFlowable(width="100%", thickness=1.2, color=colors.HexColor("#003366"), spaceAfter=8),
+            Paragraph("Screening information", styles["section"]),
+        ]
+        # Kept deliberately short: the identifiers a clinician needs to act on the
+        # referral. Version/provenance strings are recorded in the JSON export and
+        # summarised in one small line at the end rather than shown as a table.
+        metadata = [
+            [cell("Child/study ID", "small"), cell("Screening date", "small"), cell("Site", "small"), cell("Operator", "small")],
+            [
+                cell(screening_data.get("screening_id")),
+                cell(screening_timestamp if screening_timestamp != "—" else generated_at),
+                cell(screening_data.get("site")),
+                cell(screening_data.get("operator_id")),
+            ],
+        ]
+        meta_table = Table(metadata, colWidths=[4.2 * cm, 4.2 * cm, 4.2 * cm, 2.6 * cm], repeatRows=1)
+        meta_table.setStyle(table_style())
+        story += [meta_table, Spacer(1, 0.25 * cm), Paragraph("Screening outcome", styles["section"])]
+        affected_label = "Both eyes (OD and OS)" if set(affected_eyes) == {"OD", "OS"} else (
+            "Right eye (OD)" if affected_eyes[0] == "OD" else "Left eye (OS)"
         )
-
-        story = []
-
-        # ================================================================
-        # PAGE 1 — Clinical Summary
-        # ================================================================
-        story.append(Paragraph("KERASCAN Keratoconus Screening Report", S["title"]))
-        story.append(Paragraph(f"Protocol Version: {proto_ver}  |  Generated: {gen_time}", S["subtitle"]))
-        story.append(HRFlowable(width="100%", thickness=1.5, color=NAVY, spaceAfter=8))
-
-        # Metadata table
-        story.append(Paragraph("Screening Information", S["section_header"]))
-        meta = [
-            ["Field", "Value"],
-            ["Screening ID", _safe(screening_data.get("screening_id"))],
-            ["Age", _safe(screening_data.get("age"))],
-            ["Sex", _safe(screening_data.get("sex"))],
-            ["Site / School", _safe(screening_data.get("site"))],
-            ["Screening Date", _safe(screening_data.get("screening_date"))],
-            ["Operator ID", _safe(screening_data.get("operator_id"))],
-            ["Device ID", _safe(screening_data.get("device_id"))],
-            ["Consent Recorded", "Yes" if screening_data.get("consent_recorded") else "No"],
+        outcome_wording = "Referral recommended — screening findings need specialist assessment"
+        outcome = [
+            [cell("Result", "small"), cell("Priority", "small"), cell("Affected eye(s)", "small")],
+            [cell(outcome_wording), cell(screening_data.get("referral_priority")), cell(affected_label)],
         ]
-        t = Table(meta, colWidths=[5*cm, 10*cm])
-        t.setStyle(get_header_table_style())
-        story.append(t)
-        story.append(Spacer(1, 0.4*cm))
+        outcome_table = Table(outcome, colWidths=[7.5 * cm, 3.5 * cm, 4.2 * cm])
+        outcome_table.setStyle(table_style())
+        story += [outcome_table, Spacer(1, 0.10 * cm)]
+        story.append(Paragraph(
+            "Referral for corneal tomography and specialist assessment is advised.",
+            ParagraphStyle("KeraReferral", parent=styles["normal"], textColor=colors.HexColor("#8B0000"), fontName="Helvetica-Bold"),
+        ))
+        story += [Spacer(1, 0.20 * cm), Paragraph("Why this child screened positive", styles["section"])]
+        reasons = self._reason_rows(affected_eyes, eyes, protocol)
+        if not reasons:
+            raise ValueError("A referral report requires actual positive reason codes; none were found.")
 
-        # Measurements table
-        story.append(Paragraph("Measurements", S["section_header"]))
-        meas_data = [["Measurement", "OD (Right Eye)", "OS (Left Eye)"]]
-        eyes = {e.get("laterality"): e for e in screening_data.get("eyes", [])}
-        od_meas = next((m for m in eyes.get("OD", {}).get("measurements", []) if m.get("reading_number") in (None, 1)), {})
-        os_meas = next((m for m in eyes.get("OS", {}).get("measurements", []) if m.get("reading_number") in (None, 1)), {})
+        # Plain-English findings only. The observed-value/threshold detail these
+        # sentences are built from is already in the measurements table below, so
+        # the older reason-code table is not repeated here.
+        natural_sentences = self._build_natural_reason_sentences(affected_eyes, eyes, protocol)
+        for sentence in natural_sentences:
+            story.append(Paragraph(_paragraph_text(f"• {sentence}"), styles["normal"]))
+            story.append(Spacer(1, 0.08 * cm))
 
-        meas_rows = [
-            ("K1 (flat K, D)", "k1_d"),
-            ("K1 Axis (°)", "k1_axis"),
-            ("K2 / Steep K (D)", "k2_d"),
-            ("K2 Axis (°)", "k2_axis"),
-            ("Kmax (D)", "kmax_d"),
-            ("Mean K (D)", "mean_k_d"),
-            ("Pachymetry (µm)", "pachymetry_um"),
-            ("Pachymetry Type", "pachymetry_type"),
-            ("Sphere (D)", "sphere_d"),
-            ("Cylinder (D)", "cylinder_d"),
-            ("Cylinder Axis (°)", "cylinder_axis"),
-            ("VA (logMAR)", "va_logmar"),
-            ("Refraction Type", "refraction_type"),
-            ("Quality", "measurement_quality"),
-        ]
-        for label, key in meas_rows:
-            meas_data.append([label, _safe(od_meas.get(key)), _safe(os_meas.get(key))])
+        story += [Spacer(1, 0.25 * cm), Paragraph("Measurements", styles["section"])]
 
-        mt = Table(meas_data, colWidths=[5.5*cm, 4.5*cm, 4.5*cm])
-        mt.setStyle(get_measurements_table_style())
-        story.append(mt)
-        story.append(Spacer(1, 0.4*cm))
+        # Values with the out-of-threshold ones marked, in plain words. The
+        # per-eye decision enum is deliberately not repeated here: the outcome
+        # and the findings above already state it in readable form.
+        ring_pattern_words = {
+            "SUSPICIOUS": "irregular",
+            "NORMAL_LIKE": "regular",
+            "INDETERMINATE": "borderline",
+        }
+        measurement_data = [[cell(label, "small") for label in (
+            "Eye", "K1", "K2", "Thickness", "Cylinder", "Ring pattern"
+        )]]
+        for laterality in ("OD", "OS"):
+            eye = eyes.get(laterality, {})
+            measurement = self._latest_measurements(eye)
+            flags = self._flags_for_eye(eye, measurement)
 
-        # Per-eye results
-        story.append(Paragraph("Per-Eye Screening Results", S["section_header"]))
-        for lat in ("OD", "OS"):
-            eye = eyes.get(lat, {})
-            decisions = eye.get("decisions", [])
-            final_dec = decisions[-1].get("final_result", "—") if decisions else "—"
-            codes = eye.get("reason_codes") or []
-            code_str = ", ".join(HUMAN_REASON.get(c, c) for c in codes) if codes else "None"
-            is_ref = final_dec not in ("SCREEN_NEGATIVE", "")
-            eye_data = [
-                [f"{lat} — {'Right Eye' if lat == 'OD' else 'Left Eye'}", ""],
-                ["Engine result:", _safe(eye.get("eye_result"))],
-                ["Decision:", final_dec],
-                ["Reason codes:", code_str],
-            ]
-            et = Table(eye_data, colWidths=[4.5*cm, 10*cm])
-            et.setStyle(get_result_table_style(is_ref))
-            story.append(et)
-            story.append(Spacer(1, 0.2*cm))
+            # Plain words rather than a warning glyph: the core PDF fonts have no
+            # dingbat coverage, so a symbol here renders as a black box.
+            def _value(key: str, fmt: str, unit: str, flag_key: str, direction: str) -> str:
+                value = measurement.get(key)
+                if value is None:
+                    return "—"
+                marker = f" ({direction})" if flags.get(flag_key) == "ABNORMAL" else ""
+                return f"{format(float(value), fmt)} {unit}{marker}"
 
-        # Child-level decision
-        story.append(Spacer(1, 0.3*cm))
-        story.append(Paragraph("Overall Child-Level Decision", S["section_header"]))
-        overall = _safe(screening_data.get("overall_result"))
-        priority = _safe(screening_data.get("referral_priority"))
-        is_child_ref = overall not in ("SCREEN_NEGATIVE", "—")
-        child_data = [
-            ["OVERALL RESULT", "REFERRAL PRIORITY"],
-            [overall, priority],
-        ]
-        ct = Table(child_data, colWidths=[7.5*cm, 7.5*cm])
-        ct.setStyle(get_result_table_style(is_child_ref))
-        story.append(ct)
-        story.append(Spacer(1, 0.4*cm))
-
-        # Disclaimer box
-        story.append(Paragraph("⚠ " + DISCLAIMER, S["disclaimer"]))
-
-        story.append(PageBreak())
-
-        # ================================================================
-        # PAGE 2 — Images
-        # ================================================================
-        story.append(Paragraph("Image Analysis", S["section_header"]))
-        story.append(Spacer(1, 0.3*cm))
-
-        img_cells = []
-        for lat in ("OD", "OS"):
-            eye = eyes.get(lat, {})
-            img_path = eye.get("image_path")
-            cell_label = f"{lat} — Original Image"
-            if img_path and Path(img_path).exists():
-                try:
-                    img = RLImage(img_path, width=7*cm, height=7*cm)
-                    img_cells.append([img, Paragraph(cell_label, S["small"])])
-                except Exception:
-                    img_cells.append([Paragraph(f"{cell_label}\n[Image load error]", S["small"]), ""])
-            else:
-                img_cells.append([Paragraph(f"{cell_label}\n[Image not available]", S["small"]), ""])
-
-        # Render as 2-column table
-        if img_cells:
-            row = [img_cells[0][0], img_cells[1][0] if len(img_cells) > 1 else ""]
-            label_row = [img_cells[0][1], img_cells[1][1] if len(img_cells) > 1 else ""]
-            img_table = Table([row, label_row], colWidths=[7.5*cm, 7.5*cm])
-            img_table.setStyle(TableStyle([
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            story.append(img_table)
-        story.append(Spacer(1, 0.4*cm))
-
-        # Quality findings
-        story.append(Paragraph("Quality Findings", S["section_header"]))
-        q_data = [["Eye", "Gradable", "Quality Score", "Flags"]]
-        for lat in ("OD", "OS"):
-            eye = eyes.get(lat, {})
-            flags = eye.get("quality_flags") or []
-            q_data.append([
-                lat,
-                "Yes" if eye.get("quality_gradable") else "No",
-                _safe(eye.get("quality_score")),
-                ", ".join(flags) if flags else "None",
+            cylinder = measurement.get("cylinder_d")
+            cylinder_label = "—"
+            if cylinder is not None:
+                marker = " (high)" if flags.get("cylinder") == "ABNORMAL" else ""
+                cylinder_label = f"{float(cylinder):.2f} D{marker}"
+            status = eye.get("image_status") or eye.get("eye_result") or ""
+            measurement_data.append([
+                cell("Right" if laterality == "OD" else "Left"),
+                cell(_value("k1_d", ".2f", "D", "k1", "high")),
+                cell(_value("k2_d", ".2f", "D", "k2", "high")),
+                cell(_value("pachymetry_um", ".0f", "µm", "pachymetry", "low")),
+                cell(cylinder_label),
+                cell(ring_pattern_words.get(str(status), "not available")),
             ])
-        qt = Table(q_data, colWidths=[2*cm, 2.5*cm, 3*cm, 7.5*cm])
-        qt.setStyle(get_header_table_style())
-        story.append(qt)
-        story.append(Spacer(1, 0.3*cm))
+        measurement_table = LongTable(measurement_data, colWidths=[1.6 * cm, 2.6 * cm, 2.6 * cm, 2.8 * cm, 2.6 * cm, 3.0 * cm], repeatRows=1)
+        measurement_table.setStyle(table_style())
+        story += [measurement_table, Spacer(1, 0.25 * cm)]
 
-        # ROI info
-        story.append(Paragraph("ROI Detection", S["section_header"]))
-        roi_data = [["Eye", "Method", "Confidence", "Radius (px)"]]
-        for lat in ("OD", "OS"):
-            eye = eyes.get(lat, {})
-            roi_data.append([
-                lat,
-                _safe(eye.get("roi_method")),
-                _safe(eye.get("roi_confidence")),
-                _safe(eye.get("roi_radius")),
-            ])
-        rt = Table(roi_data, colWidths=[2*cm, 5*cm, 4*cm, 4*cm])
-        rt.setStyle(get_header_table_style())
-        story.append(rt)
+        story += [Paragraph("Affected eye image", styles["section"])]
+        # One image per affected eye, in order of preference. The full artefact
+        # set stays on disk and in the JSON export for anyone who needs it; the
+        # referral itself carries only the single most useful picture.
+        image_preference = (
+            "clinician_comparison_panel.png",
+            "observed_vs_concentric_reference.png",
+            "tracked_rings_cartesian.png",
+            "cropped_roi.png",
+            "cropped_roi_centres.png",
+            "directional_spacing.png",
+        )
+        image_labels = {
+            "cropped_roi.png": "cropped corneal ring image",
+            "cropped_roi_centres.png": "cropped ring image with centre",
+            "tracked_rings_cartesian.png": "detected ring pattern",
+            "directional_spacing.png": "ring-spacing pattern",
+            "observed_vs_concentric_reference.png": "observed rings (solid) vs even-spacing reference (dashed)",
+            "clinician_comparison_panel.png": "ring-pattern comparison",
+        }
+        report_image_count = 0
+        chosen_by_eye: dict[str, tuple[str, Path]] = {}
+        for laterality in affected_eyes:
+            eye = eyes[laterality]
+            chosen: tuple[str, Path] | None = None
+            for filename in image_preference:
+                artifact = self._verified_report_image(eye, filename)
+                if artifact is not None:
+                    chosen = (filename, artifact)
+                    break
+            if chosen is None:
+                raise ValueError(
+                    f"Referral PDF cannot be generated because the verified {laterality} "
+                    "analysis image set is unavailable."
+                )
+            chosen_by_eye[laterality] = chosen
+            filename, artifact = chosen
+            eye_name = "Right eye (OD)" if laterality == "OD" else "Left eye (OS)"
+            story.append(self._image_flowable(artifact, f"{eye_name} — {image_labels.get(filename, filename)}", styles))
+            report_image_count += 1
+        if report_image_count == 0:
+            raise ValueError("Referral PDF cannot be generated because verified affected-eye analysis artefacts are unavailable.")
 
-        story.append(PageBreak())
+        # Appendix: every remaining verified analysis image for the affected
+        # eye(s), so a reviewer working from the referral alone has the full
+        # picture set for that child without going back to the local database.
+        appendix: list[Any] = []
+        for laterality in affected_eyes:
+            eye = eyes[laterality]
+            eye_name = "Right eye (OD)" if laterality == "OD" else "Left eye (OS)"
+            shown = {name for name, _ in [chosen_by_eye[laterality]]} if laterality in chosen_by_eye else set()
+            for filename in image_preference:
+                if filename in shown:
+                    continue
+                artifact = self._verified_report_image(eye, filename)
+                if artifact is None:
+                    continue
+                appendix.append(
+                    self._image_flowable(artifact, f"{eye_name} — {image_labels.get(filename, filename)}", styles)
+                )
+        if appendix:
+            story.append(PageBreak())
+            story.append(Paragraph("Analysis images", styles["section"]))
+            story.append(Paragraph(
+                _paragraph_text(
+                    "Image-space ring measurements retained for later review. These are "
+                    "engineering comparisons, not corneal maps, and are not diagnostic."
+                ),
+                styles["small"],
+            ))
+            story.append(Spacer(1, 0.15 * cm))
+            story += appendix
 
-        # ================================================================
-        # PAGE 3 — Detailed Data & Audit
-        # ================================================================
-        story.append(Paragraph("Detailed Measurements & Repeat Readings", S["section_header"]))
-        repeat_data = [["Eye", "Reading #", "K2 (D)", "Pachy (µm)", "Cyl (D)", "Quality"]]
-        for lat in ("OD", "OS"):
-            eye = eyes.get(lat, {})
-            for m in eye.get("measurements", []):
-                repeat_data.append([
-                    lat,
-                    _safe(m.get("reading_number")),
-                    _safe(m.get("k2_d")),
-                    _safe(m.get("pachymetry_um")),
-                    _safe(m.get("cylinder_d")),
-                    _safe(m.get("measurement_quality")),
-                ])
-        rdt = Table(repeat_data, colWidths=[2*cm, 2.5*cm, 3*cm, 3*cm, 3*cm, 2.5*cm])
-        rdt.setStyle(get_measurements_table_style())
-        story.append(rdt)
-        story.append(Spacer(1, 0.4*cm))
-
-        # Versions table
-        story.append(Paragraph("Versions & Provenance", S["section_header"]))
-        od_eye = eyes.get("OD", {})
-        ia_list = od_eye.get("image_analyses", [{}])
-        ia = ia_list[0] if ia_list else {}
-        ver_data = [
-            ["Item", "Value"],
-            ["Protocol version", _safe(screening_data.get("protocol_version"))],
-            ["Pipeline version (OD)", _safe(od_eye.get("pipeline_version"))],
-            ["Model hash (OD)", _safe(ia.get("model_hash"))],
-            ["Classification skipped (OD)", str(ia.get("classification_skipped", "—"))],
-            ["Prototype score (OD)", _safe(ia.get("prototype_score"))],
+        story += [
+            Spacer(1, 0.25 * cm),
+            Paragraph(DISCLAIMER, styles["disclaimer"]),
+            Spacer(1, 0.15 * cm),
+            Paragraph(
+                _paragraph_text(
+                    f"Protocol {screening_data.get('protocol_version') or protocol.protocol_version} · "
+                    f"analysis {pipeline_version} · method {model_version} · "
+                    f"provenance {provenance_summary}"
+                ),
+                styles["small"],
+            ),
         ]
-        vt = Table(ver_data, colWidths=[5.5*cm, 9.5*cm])
-        vt.setStyle(get_header_table_style())
-        story.append(vt)
-        story.append(Spacer(1, 0.4*cm))
-
-        # Audit trail
-        story.append(Paragraph("Decision Audit Trail", S["section_header"]))
-        audit_rows = [["Level", "Result", "Overridden", "Override By", "Reason"]]
-        all_decisions = screening_data.get("decisions", [])
-        for eye_d in screening_data.get("eyes", []):
-            all_decisions += eye_d.get("decisions", [])
-        for d in all_decisions:
-            audit_rows.append([
-                _safe(d.get("decision_level")),
-                _safe(d.get("final_result")),
-                "Yes" if d.get("is_overridden") else "No",
-                _safe(d.get("override_by")),
-                _safe(d.get("override_reason")),
-            ])
-        at = Table(audit_rows, colWidths=[2*cm, 4*cm, 2.5*cm, 3.5*cm, 3*cm])
-        at.setStyle(get_audit_table_style())
-        story.append(at)
-        story.append(Spacer(1, 0.4*cm))
-
-        story.append(HRFlowable(width="100%", thickness=1, color=NAVY))
-        story.append(Spacer(1, 0.2*cm))
-        story.append(Paragraph(DISCLAIMER, S["disclaimer"]))
-
-        doc.build(story, onFirstPage=make_header_footer, onLaterPages=make_header_footer)
-        log.info("generate_pdf: wrote %s", output)
+        document = SimpleDocTemplate(
+            str(output), pagesize=A4, topMargin=1.55 * cm, bottomMargin=1.3 * cm,
+            leftMargin=1.15 * cm, rightMargin=1.15 * cm,
+        )
+        document.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
+        if not self.verify_pdf(output):
+            try:
+                output.unlink()
+            except OSError:
+                pass
+            raise RuntimeError("Generated local PDF did not pass structural validation.")
         return str(output.resolve())
 
-    # ------------------------------------------------------------------
-    # Combined
-    # ------------------------------------------------------------------
-
-    def generate_all_exports(self, screening_data: dict, output_dir: str) -> dict[str, str]:
-        """Generate PDF, JSON, and Excel. Returns dict of format -> path."""
+    def generate_all_exports(self, screening_data: dict[str, Any], output_dir: str) -> dict[str, str | dict[str, str]]:
+        """Export JSON/XLSX for any outcome; add detailed PDF only for REFER."""
         base = Path(output_dir)
-        sid = screening_data.get("screening_id", "report")
-        results = {}
-        errors = {}
-
-        for fmt, method, ext in [
-            ("pdf",   self.generate_pdf,   "pdf"),
-            ("json",  self.generate_json,  "json"),
+        screening_id = str(screening_data.get("screening_id", "report"))
+        results: dict[str, str | dict[str, str]] = {}
+        errors: dict[str, str] = {}
+        for name, method, suffix in (
+            ("json", self.generate_json, "json"),
             ("excel", self.generate_excel, "xlsx"),
-        ]:
-            path = str(base / f"{sid}.{ext}")
+        ):
             try:
-                results[fmt] = method(screening_data, path)
+                results[name] = method(screening_data, str(base / f"{screening_id}.{suffix}"))
+            except Exception as exc:  # pragma: no cover - retained diagnostics
+                log.exception("%s export failed", name)
+                errors[name] = str(exc)
+        if self._is_refer_action(screening_data):
+            try:
+                results["pdf"] = self.generate_pdf(screening_data, str(base / f"{screening_id}.pdf"))
             except Exception as exc:
-                log.error("generate_all_exports: %s failed: %s", fmt, exc)
-                errors[fmt] = str(exc)
-
+                log.exception("pdf export failed")
+                errors["pdf"] = str(exc)
         if errors:
             results["errors"] = errors
         return results

@@ -1,435 +1,518 @@
-"""
-referral_engine.py — Deterministic, auditable referral rule engine.
+"""Deterministic image-and-measurement screening matrix.
 
-All clinical thresholds are loaded from config/referral_protocol.yaml.
-The Phase 1 AI score NEVER directly determines referral — it must pass
-through these explicit rules.
-
-Reason codes (per-eye):
-    IMG_SUSPICIOUS, IMG_UNGRADABLE, K_HIGH, PACHY_LOW, CYL_HIGH,
-    TWO_DOMAIN_ABNORMAL, CLINICAL_SIGN, INTER_EYE_ASYMMETRY,
-    REPEAT_REQUIRED, MEASUREMENT_MISSING
-
-Output codes:
-    SCREEN_NEGATIVE, STANDARD_REFERRAL, PRIORITY_REFERRAL,
-    RECAPTURE_REQUIRED, INCOMPLETE, MANUAL_REVIEW
+This module is intentionally separate from the image engine.  It consumes only
+the engine's gated result: a caller cannot turn a missing, rejected, or blocked
+image into a normal image result here.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import yaml
+from .protocol import ScreeningProtocol, load_protocol
 
-log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Approved reason / output codes
-# ---------------------------------------------------------------------------
+ImageStatus = Literal[
+    "GOOD_QUALITY_PENDING_ANALYSIS", "NORMAL_LIKE", "SUSPICIOUS",
+    "IMAGE_REJECTED", "SEGMENTATION_FAILED", "TRACKING_FAILED",
+    "ANALYSIS_BLOCKED", "MISSING", "INDETERMINATE", "UNGRADABLE", "NOT_CALIBRATED",
+]
 
-VALID_REASON_CODES = frozenset({
-    "IMG_SUSPICIOUS", "IMG_UNGRADABLE", "K_HIGH", "PACHY_LOW", "CYL_HIGH",
-    "TWO_DOMAIN_ABNORMAL", "CLINICAL_SIGN", "INTER_EYE_ASYMMETRY",
-    "REPEAT_REQUIRED", "MEASUREMENT_MISSING",
+IMAGE_STATES = frozenset({
+    "GOOD_QUALITY_PENDING_ANALYSIS", "NORMAL_LIKE", "SUSPICIOUS",
+    "IMAGE_REJECTED", "SEGMENTATION_FAILED", "TRACKING_FAILED",
+    "ANALYSIS_BLOCKED", "MISSING", "INDETERMINATE", "UNGRADABLE", "NOT_CALIBRATED",
 })
+COMPLETE_IMAGE_STATES = frozenset({"NORMAL_LIKE", "SUSPICIOUS"})
 
-VALID_OUTPUT_CODES = frozenset({
-    "SCREEN_NEGATIVE", "STANDARD_REFERRAL", "PRIORITY_REFERRAL",
-    "RECAPTURE_REQUIRED", "INCOMPLETE", "MANUAL_REVIEW",
-})
-
-# Phase 1 engine output labels
+# Kept as public aliases for callers of the original application interface.
 ENGINE_SUSPICIOUS = "SUSPICIOUS"
 ENGINE_NORMAL = "NORMAL-LIKE"
 ENGINE_UNGRADABLE = "UNGRADABLE"
+ENGINE_INDETERMINATE = "INDETERMINATE"
+ENGINE_NOT_CALIBRATED = "NOT_CALIBRATED"
+
+VALID_REASON_CODES = frozenset({
+    "IMAGE_CLASSIFIER_SUSPICIOUS",
+    "K2_ABOVE_46_8_D",
+    "PACHYMETRY_BELOW_480_UM",
+    "CYLINDER_MAGNITUDE_ABOVE_1_5_D",
+    "MULTIPLE_QUANTITATIVE_ABNORMALITIES",
+    "MEASUREMENT_MISSING",
+    "MEASUREMENT_INVALID",
+    "IMAGE_MISSING",
+    "IMAGE_REJECTED",
+    "SEGMENTATION_FAILED",
+    "TRACKING_FAILED",
+    "ANALYSIS_BLOCKED",
+    "IMAGE_NOT_READY",
+    "IMAGE_INDETERMINATE",
+    "INDETERMINATE",
+    "UNGRADABLE",
+    "NOT_CALIBRATED",
+})
+
+VALID_OUTPUT_CODES = frozenset({
+    "HIGH_RISK_SCREEN_POSITIVE",
+    "SCREEN_POSITIVE_IMAGE_ONLY",
+    "DISCORDANT_SCREEN_POSITIVE",
+    "SCREEN_POSITIVE_CYLINDER",
+    "INDETERMINATE_SINGLE_PARAMETER",
+    "SCREEN_NEGATIVE",
+    "INCOMPLETE_SCREENING",
+    "SCREEN_POSITIVE",
+    "REPEAT_REQUIRED",
+})
 
 
-# ---------------------------------------------------------------------------
-# Result dataclasses
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class EyeScreeningInput:
+    """Canonical active input model for one eye in the initial workflow."""
+
+    eye: Literal["OD", "OS"]
+    kerascan_image_id: str | None
+    image_status: ImageStatus
+    k1_d: float | None
+    k2_d: float | None
+    pachymetry_um: float | None
+    cylinder_d: float | None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        eye: str,
+        measurements: dict[str, Any] | None,
+        image_status: str,
+        kerascan_image_id: str | None = None,
+    ) -> "EyeScreeningInput":
+        if eye not in {"OD", "OS"}:
+            raise ValueError("eye must be OD or OS")
+        if image_status not in IMAGE_STATES:
+            raise ValueError(f"unknown image status: {image_status}")
+        data = measurements or {}
+
+        def number(name: str) -> float | None:
+            value = data.get(name)
+            if value is None or value == "":
+                return None
+            try:
+                numeric = float(value)
+                return numeric if math.isfinite(numeric) else None
+            except (TypeError, ValueError):
+                return None
+
+        return cls(
+            eye=eye,  # type: ignore[arg-type]
+            kerascan_image_id=kerascan_image_id,
+            image_status=image_status,  # type: ignore[arg-type]
+            k1_d=number("k1_d"),
+            k2_d=number("k2_d"),
+            pachymetry_um=number("pachymetry_um"),
+            cylinder_d=number("cylinder_d"),
+        )
+
+
+@dataclass(frozen=True)
+class EyeScreeningFlags:
+    image: Literal["NORMAL_LIKE", "SUSPICIOUS", "INVALID"]
+    keratometry: Literal["NORMAL", "ABNORMAL", "MISSING", "INVALID"]
+    pachymetry: Literal["NORMAL", "ABNORMAL", "MISSING", "INVALID"]
+    refraction: Literal["NORMAL", "ABNORMAL", "MISSING", "INVALID"]
+    abnormal_measurement_count: int
+
 
 @dataclass
 class EyeReferralResult:
-    laterality: str           # "OD" or "OS"
-    decision: str             # one of VALID_OUTPUT_CODES
+    laterality: str
+    decision: str
+    action: str
+    priority: str = "NONE"
     reason_codes: list[str] = field(default_factory=list)
-    engine_result: str = ""   # raw Phase 1 label
+    engine_result: str = ""
+    image_status: str = "MISSING"
+    flags: EyeScreeningFlags | None = None
+    explanation: str = ""
+    missing_or_invalid_fields: list[str] = field(default_factory=list)
     repeat_required: bool = False
-    needs_third_reading: bool = False
+    needs_third_reading: bool = False  # retained only for old persisted records
     protocol_version: str = ""
 
-    def __post_init__(self):
-        assert self.decision in VALID_OUTPUT_CODES, f"Invalid decision: {self.decision}"
-        for code in self.reason_codes:
-            assert code in VALID_REASON_CODES, f"Invalid reason code: {code}"
+    def __post_init__(self) -> None:
+        if self.decision not in VALID_OUTPUT_CODES:
+            raise ValueError(f"Invalid decision: {self.decision}")
+        unknown = set(self.reason_codes) - VALID_REASON_CODES
+        if unknown:
+            raise ValueError(f"Invalid reason codes: {', '.join(sorted(unknown))}")
 
 
 @dataclass
 class ChildReferralResult:
-    decision: str             # one of VALID_OUTPUT_CODES
-    referral_priority: str    # "PRIORITY" | "STANDARD" | "NONE"
+    decision: str
+    action: str
+    referral_priority: str
     od_result: EyeReferralResult | None
     os_result: EyeReferralResult | None
     reason_codes: list[str] = field(default_factory=list)
-    inter_eye_asymmetry: bool = False
+    affected_eyes: list[str] = field(default_factory=list)
     protocol_version: str = ""
+    explanation: str = ""
+    inter_eye_asymmetry: bool = False  # no longer contributes to this protocol
 
-
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
 
 class ReferralEngine:
-    """
-    Loads referral_protocol.yaml and applies the deterministic decision matrix.
-    Instantiate once and reuse — the config is read at construction time.
-    """
+    """Apply the provisional school-screening decision matrix deterministically."""
 
     def __init__(self, protocol_path: str | Path | None = None) -> None:
-        if protocol_path is None:
-            protocol_path = Path(__file__).parent.parent / "config" / "referral_protocol.yaml"
-        self._protocol_path = Path(protocol_path)
-        self._protocol = self._load_protocol()
-
-    # ------------------------------------------------------------------
-    # Protocol loading
-    # ------------------------------------------------------------------
-
-    def _load_protocol(self) -> dict:
-        with open(self._protocol_path, "r") as fh:
-            protocol = yaml.safe_load(fh)
-        log.info("ReferralEngine: loaded protocol version=%s", protocol.get("version"))
-        return protocol
+        self._protocol_path = Path(protocol_path) if protocol_path else None
+        self.protocol: ScreeningProtocol = load_protocol(self._protocol_path)
 
     def get_protocol_version(self) -> str:
-        return self._protocol.get("version", "unknown")
+        return self.protocol.protocol_version
 
     def get_disclaimer(self) -> str:
-        return self._protocol.get("disclaimer", "")
+        return self.protocol.disclaimer
 
-    # ------------------------------------------------------------------
-    # Threshold accessors
-    # ------------------------------------------------------------------
-
-    def _k_high_threshold(self) -> float:
-        return float(self._protocol["keratometry"]["high_threshold_d"])
-
-    def _pachy_low_threshold(self) -> float:
-        return float(self._protocol["pachymetry"]["low_threshold_um"])
-
-    def _cyl_high_threshold(self) -> float:
-        return float(self._protocol["cylinder"]["high_threshold_d"])
-
-    def _k2_asymmetry_threshold(self) -> float:
-        return float(self._protocol.get("inter_eye_asymmetry", {}).get("k2_diff_threshold_d", 1.5))
-
-    def _repeat_required_on_isolated(self) -> bool:
-        return bool(self._protocol.get("repeat_policy", {}).get("required_on_isolated_abnormality", True))
-
-    # ------------------------------------------------------------------
-    # Completeness check
-    # ------------------------------------------------------------------
-
-    def check_measurement_completeness(self, measurements: dict) -> tuple[bool, list[str]]:
-        """
-        Check that the minimum required quantitative fields are present.
-        Returns (is_complete, list_of_missing_field_names).
-        At minimum K2 OR pachymetry must be present for a gradable eye.
-        """
-        missing: list[str] = []
-
-        # K2 is the primary keratometry metric per protocol
-        if measurements.get("k2_d") is None:
-            missing.append("k2_d")
-
-        # At least one pachymetry value must be present
-        if measurements.get("pachymetry_um") is None:
-            missing.append("pachymetry_um")
-
-        # Pachymetry type must be specified if pachymetry is given
-        if measurements.get("pachymetry_um") is not None and not measurements.get("pachymetry_type"):
-            missing.append("pachymetry_type")
-
-        return len(missing) == 0, missing
-
-    # ------------------------------------------------------------------
-    # Quantitative threshold evaluation
-    # ------------------------------------------------------------------
-
-    def apply_quantitative_thresholds(self, measurements: dict) -> dict[str, bool]:
-        """
-        Evaluate which quantitative thresholds are breached.
-        Returns a dict of flag_name -> bool.
-
-        Uses K2 (steep K) as the keratometry metric per protocol.
-        Distinguishes K2, Kmax, and mean K — only K2 is used for referral.
-        Distinguishes central vs thinnest pachymetry — both types are compared.
-        """
-        flags: dict[str, bool] = {
-            "K_HIGH": False,
-            "PACHY_LOW": False,
-            "CYL_HIGH": False,
+    @property
+    def thresholds(self) -> dict[str, float]:
+        return {
+            "k2_abnormal_above_d": self.protocol.k2_abnormal_above_d,
+            "pachymetry_abnormal_below_um": self.protocol.pachymetry_abnormal_below_um,
+            "cylinder_magnitude_abnormal_above_d": self.protocol.cylinder_magnitude_abnormal_above_d,
         }
 
-        # Keratometry — use K2 (steep K) per protocol, not Kmax or mean K
-        k2 = measurements.get("k2_d")
-        if k2 is not None:
-            flags["K_HIGH"] = float(k2) >= self._k_high_threshold()
+    def check_measurement_completeness(
+        self, measurements: dict[str, Any], *, require_k1: bool = True
+    ) -> tuple[bool, list[str]]:
+        required = ["k2_d", "pachymetry_um", "cylinder_d"]
+        if require_k1:
+            required.insert(0, "k1_d")
+        missing = [field for field in required if measurements.get(field) is None or measurements.get(field) == ""]
+        return not missing, missing
 
-        # Pachymetry — compare regardless of central/thinnest type
-        pachy = measurements.get("pachymetry_um")
-        if pachy is not None:
-            flags["PACHY_LOW"] = float(pachy) <= self._pachy_low_threshold()
+    def _measurement_flags(self, data: EyeScreeningInput) -> tuple[EyeScreeningFlags, list[str], list[str]]:
+        """Return flags, stable positive codes, and invalid/missing field names."""
+        invalid: list[str] = []
+        codes: list[str] = []
 
-        # Cylinder magnitude
-        cyl = measurements.get("cylinder_d")
-        if cyl is not None:
-            flags["CYL_HIGH"] = abs(float(cyl)) >= self._cyl_high_threshold()
+        if data.k1_d is None or data.k2_d is None:
+            keratometry = "MISSING"
+            if data.k1_d is None:
+                invalid.append("K1 flat (D)")
+            if data.k2_d is None:
+                invalid.append("K2 steep (D)")
+        elif data.k1_d > data.k2_d:
+            keratometry = "INVALID"
+            invalid.append("K1 flat (D) must be less than or equal to K2 steep (D)")
+        elif data.k2_d > self.protocol.k2_abnormal_above_d:
+            keratometry = "ABNORMAL"
+            codes.append("K2_ABOVE_46_8_D")
+        else:
+            keratometry = "NORMAL"
 
-        return flags
+        if data.pachymetry_um is None:
+            pachymetry = "MISSING"
+            invalid.append("Pachymetry (µm)")
+        elif data.pachymetry_um < self.protocol.pachymetry_abnormal_below_um:
+            pachymetry = "ABNORMAL"
+            codes.append("PACHYMETRY_BELOW_480_UM")
+        else:
+            pachymetry = "NORMAL"
 
-    # ------------------------------------------------------------------
-    # Per-eye decision
-    # ------------------------------------------------------------------
+        if data.cylinder_d is None:
+            refraction = "MISSING"
+            invalid.append("Cylinder (D)")
+        elif abs(data.cylinder_d) > self.protocol.cylinder_magnitude_abnormal_above_d:
+            refraction = "ABNORMAL"
+            codes.append("CYLINDER_MAGNITUDE_ABOVE_1_5_D")
+        else:
+            refraction = "NORMAL"
+
+        image = data.image_status if data.image_status in COMPLETE_IMAGE_STATES else "INVALID"
+        count = sum(status == "ABNORMAL" for status in (keratometry, pachymetry, refraction))
+        return (
+            EyeScreeningFlags(
+                image=image,  # type: ignore[arg-type]
+                keratometry=keratometry,  # type: ignore[arg-type]
+                pachymetry=pachymetry,  # type: ignore[arg-type]
+                refraction=refraction,  # type: ignore[arg-type]
+                abnormal_measurement_count=count,
+            ),
+            codes,
+            invalid,
+        )
+
+    def apply_quantitative_thresholds(self, measurements: dict[str, Any]) -> dict[str, bool]:
+        """Compatibility accessor using the current strict boundary semantics."""
+        data = EyeScreeningInput.from_mapping("OD", measurements, "NORMAL_LIKE")
+        _, codes, _ = self._measurement_flags(data)
+        return {
+            "K2_ABOVE_46_8_D": "K2_ABOVE_46_8_D" in codes,
+            "PACHYMETRY_BELOW_480_UM": "PACHYMETRY_BELOW_480_UM" in codes,
+            "CYLINDER_MAGNITUDE_ABOVE_1_5_D": "CYLINDER_MAGNITUDE_ABOVE_1_5_D" in codes,
+        }
+
+    @staticmethod
+    def _image_reason(image_status: str) -> tuple[str, str]:
+        mapping = {
+            "MISSING": ("IMAGE_MISSING", "A KeraScan image is required for this eye."),
+            "IMAGE_REJECTED": ("IMAGE_REJECTED", "Image rejected; upload a new good-quality KeraScan image."),
+            "SEGMENTATION_FAILED": ("SEGMENTATION_FAILED", "Image segmentation failed; upload a new good-quality KeraScan image."),
+            "TRACKING_FAILED": ("TRACKING_FAILED", "Polar ring tracking failed; upload a new good-quality KeraScan image."),
+            "ANALYSIS_BLOCKED": ("ANALYSIS_BLOCKED", "Image analysis is blocked because the verified KeraScan hardware ring count has not been configured."),
+            "GOOD_QUALITY_PENDING_ANALYSIS": ("IMAGE_NOT_READY", "Good-quality image is pending completed image analysis."),
+            "INDETERMINATE": ("IMAGE_INDETERMINATE", "Image analysis produced an indeterminate result; repeat measurement or clinical review required."),
+            "UNGRADABLE": ("IMAGE_REJECTED", "Image quality or geometry was ungradable; upload a new good-quality image."),
+            "NOT_CALIBRATED": ("ANALYSIS_BLOCKED", "Image analysis is not clinically calibrated for this device configuration."),
+        }
+        return mapping.get(image_status, ("IMAGE_REJECTED", "Image verification is not valid."))
+
+    def evaluate_input(self, data: EyeScreeningInput, *, engine_result: str | None = None) -> EyeReferralResult:
+        flags, measurement_codes, invalid_fields = self._measurement_flags(data)
+        proto = self.get_protocol_version()
+
+        # A rejected, missing, or blocked image can never acquire a normal label
+        # because measurements happen to be normal.
+        if data.image_status not in COMPLETE_IMAGE_STATES:
+            # An unusable image must not suppress a referral the measurements
+            # already justify. Two or more abnormal domains still refer, so the
+            # child reaches tomography; a repeat image is advised alongside.
+            if not invalid_fields and flags.abnormal_measurement_count >= 2:
+                return EyeReferralResult(
+                    laterality=data.eye,
+                    decision="DISCORDANT_SCREEN_POSITIVE",
+                    action="REFER",
+                    priority="PRIORITY_1",
+                    reason_codes=list(measurement_codes) + ["MULTIPLE_QUANTITATIVE_ABNORMALITIES"],
+                    engine_result=engine_result or "UNGRADABLE",
+                    image_status=data.image_status,
+                    flags=flags,
+                    explanation=(
+                        "Two or more quantitative screening domains were abnormal. The KeraScan image "
+                        "could not be graded, so referral is based on the measurements alone; repeat "
+                        "the image when possible."
+                    ),
+                    repeat_required=True,
+                    protocol_version=proto,
+                )
+            code, explanation = self._image_reason(data.image_status)
+            return EyeReferralResult(
+                laterality=data.eye,
+                decision="INCOMPLETE_SCREENING",
+                action="INCOMPLETE",
+                reason_codes=[code] + measurement_codes,
+                engine_result=engine_result or "UNGRADABLE",
+                image_status=data.image_status,
+                flags=flags,
+                explanation=explanation,
+                missing_or_invalid_fields=invalid_fields,
+                protocol_version=proto,
+            )
+
+        if invalid_fields:
+            code = "MEASUREMENT_MISSING" if any(
+                field in {"K1 flat (D)", "K2 steep (D)", "Pachymetry (µm)", "Cylinder (D)"}
+                for field in invalid_fields
+            ) else "MEASUREMENT_INVALID"
+            return EyeReferralResult(
+                laterality=data.eye,
+                decision="INCOMPLETE_SCREENING",
+                action="INCOMPLETE",
+                reason_codes=[code] + measurement_codes,
+                engine_result=engine_result or data.image_status,
+                image_status=data.image_status,
+                flags=flags,
+                explanation="Complete and correct the required screening measurements before finalizing.",
+                missing_or_invalid_fields=invalid_fields,
+                protocol_version=proto,
+            )
+
+        n_abnormal = flags.abnormal_measurement_count
+        if data.image_status == "SUSPICIOUS":
+            reasons = ["IMAGE_CLASSIFIER_SUSPICIOUS"] + measurement_codes
+            if n_abnormal >= 1:
+                if n_abnormal >= 2:
+                    reasons.append("MULTIPLE_QUANTITATIVE_ABNORMALITIES")
+                return EyeReferralResult(
+                    laterality=data.eye,
+                    decision="HIGH_RISK_SCREEN_POSITIVE",
+                    action="REFER",
+                    priority="PRIORITY_1",
+                    reason_codes=reasons,
+                    engine_result=engine_result or "SUSPICIOUS",
+                    image_status=data.image_status,
+                    flags=flags,
+                    explanation="Suspicious KeraScan image with at least one additional abnormal screening measurement.",
+                    protocol_version=proto,
+                )
+            return EyeReferralResult(
+                laterality=data.eye,
+                decision="SCREEN_POSITIVE_IMAGE_ONLY",
+                action="REFER",
+                priority="PRIORITY_2",
+                reason_codes=reasons,
+                engine_result=engine_result or "SUSPICIOUS",
+                image_status=data.image_status,
+                flags=flags,
+                explanation=(
+                    "The KeraScan image was reproducibly classified as suspicious although the "
+                    "entered measurements were within the provisional study thresholds."
+                ),
+                protocol_version=proto,
+            )
+
+        # The only remaining completed state is NORMAL_LIKE.
+        if n_abnormal >= 2:
+            reasons = list(measurement_codes) + ["MULTIPLE_QUANTITATIVE_ABNORMALITIES"]
+            return EyeReferralResult(
+                laterality=data.eye,
+                decision="DISCORDANT_SCREEN_POSITIVE",
+                action="REFER",
+                priority="PRIORITY_1",
+                reason_codes=reasons,
+                engine_result=engine_result or "NORMAL-LIKE",
+                image_status=data.image_status,
+                flags=flags,
+                explanation="Two or more quantitative screening domains were abnormal despite a normal-like KeraScan image.",
+                protocol_version=proto,
+            )
+        if n_abnormal == 1:
+            # A raised cylinder is a standalone referral trigger under the
+            # school-screening criteria, so it is not sent for repeat the way an
+            # isolated keratometry or pachymetry reading is.
+            if "CYLINDER_MAGNITUDE_ABOVE_1_5_D" in measurement_codes:
+                return EyeReferralResult(
+                    laterality=data.eye,
+                    decision="SCREEN_POSITIVE_CYLINDER",
+                    action="REFER",
+                    priority="PRIORITY_2",
+                    reason_codes=list(measurement_codes),
+                    engine_result=engine_result or "NORMAL-LIKE",
+                    image_status=data.image_status,
+                    flags=flags,
+                    explanation=(
+                        "Astigmatic cylinder magnitude exceeded the screening threshold. "
+                        "Corneal imaging is recommended even though the KeraScan image was normal-like."
+                    ),
+                    protocol_version=proto,
+                )
+            domain = {
+                "K2_ABOVE_46_8_D": "keratometry (K2)",
+                "PACHYMETRY_BELOW_480_UM": "pachymetry",
+            }[measurement_codes[0]]
+            return EyeReferralResult(
+                laterality=data.eye,
+                decision="INDETERMINATE_SINGLE_PARAMETER",
+                action="REPEAT_MEASUREMENT",
+                reason_codes=measurement_codes,
+                engine_result=engine_result or "NORMAL-LIKE",
+                image_status=data.image_status,
+                flags=flags,
+                explanation=(
+                    f"One isolated quantitative screening parameter was abnormal ({domain}). "
+                    "Repeat the measurement; refer if the abnormal value is reproduced."
+                ),
+                repeat_required=True,
+                protocol_version=proto,
+            )
+        return EyeReferralResult(
+            laterality=data.eye,
+            decision="SCREEN_NEGATIVE",
+            action="NO_IMMEDIATE_REFERRAL",
+            reason_codes=[],
+            engine_result=engine_result or "NORMAL-LIKE",
+            image_status=data.image_status,
+            flags=flags,
+            explanation="No KeraScan screening criterion was positive at this encounter.",
+            protocol_version=proto,
+        )
 
     def evaluate_eye(
         self,
         laterality: str,
         image_result: str,
-        measurements: dict,
+        measurements: dict[str, Any],
         repeat_count: int = 1,
+        *,
+        image_status: str | None = None,
+        kerascan_image_id: str | None = None,
     ) -> EyeReferralResult:
+        """Evaluate an eye; service callers must supply the verified image state.
+
+        The no-``image_status`` fallback preserves the old programmatic API for
+        archived records only.  The active :class:`ScreeningService` always
+        provides a state derived from the complete image pipeline.
         """
-        Apply the decision matrix for one eye.
-
-        Parameters
-        ----------
-        laterality    : "OD" or "OS"
-        image_result  : Phase 1 engine screening_result
-                        ("SUSPICIOUS" | "NORMAL-LIKE" | "UNGRADABLE")
-        measurements  : dict with keys k2_d, pachymetry_um, pachymetry_type,
-                        cylinder_d, and optional k1_d, kmax_d, mean_k_d, sphere_d
-        repeat_count  : number of reading sets recorded (1, 2, or 3)
-
-        Returns
-        -------
-        EyeReferralResult
-        """
-        proto_ver = self.get_protocol_version()
-        reason_codes: list[str] = []
-        repeat_required = False
-        needs_third = False
-
-        # ── UNGRADABLE path ──────────────────────────────────────────
-        if image_result == ENGINE_UNGRADABLE:
-            reason_codes.append("IMG_UNGRADABLE")
-            # Check quantitative — if any abnormal: RECAPTURE and flag
-            is_complete, missing = self.check_measurement_completeness(measurements)
-            if not is_complete:
-                for _ in missing:
-                    if "MEASUREMENT_MISSING" not in reason_codes:
-                        reason_codes.append("MEASUREMENT_MISSING")
-                return EyeReferralResult(
-                    laterality=laterality,
-                    decision="INCOMPLETE",
-                    reason_codes=reason_codes,
-                    engine_result=image_result,
-                    protocol_version=proto_ver,
-                )
-            flags = self.apply_quantitative_thresholds(measurements)
-            # UNGRADABLE is NEVER converted to SCREEN_NEGATIVE
-            return EyeReferralResult(
-                laterality=laterality,
-                decision="RECAPTURE_REQUIRED",
-                reason_codes=reason_codes + [k for k, v in flags.items() if v],
-                engine_result=image_result,
-                repeat_required=True,
-                protocol_version=proto_ver,
-            )
-
-        # ── Completeness check ───────────────────────────────────────
-        is_complete, missing = self.check_measurement_completeness(measurements)
-        if not is_complete:
-            reason_codes.append("MEASUREMENT_MISSING")
-            return EyeReferralResult(
-                laterality=laterality,
-                decision="INCOMPLETE",
-                reason_codes=reason_codes,
-                engine_result=image_result,
-                protocol_version=proto_ver,
-            )
-
-        # ── Quantitative flags ───────────────────────────────────────
-        flags = self.apply_quantitative_thresholds(measurements)
-        k_high   = flags["K_HIGH"]
-        pachy_low = flags["PACHY_LOW"]
-        cyl_high  = flags["CYL_HIGH"]
-        abnormal_quant = [k for k, v in flags.items() if v]
-        n_abnormal = len(abnormal_quant)
-
-        # Clinical signs (Vogt striae, Fleischer ring, etc.)
-        has_clinical_sign = bool(measurements.get("clinical_flags"))
-
-        # ── SUSPICIOUS path ──────────────────────────────────────────
-        if image_result == ENGINE_SUSPICIOUS:
-            reason_codes.append("IMG_SUSPICIOUS")
-            if has_clinical_sign:
-                reason_codes.append("CLINICAL_SIGN")
-            if n_abnormal > 0:
-                # Suspicious + any abnormal quantitative -> PRIORITY
-                reason_codes.extend(abnormal_quant)
-                return EyeReferralResult(
-                    laterality=laterality,
-                    decision="PRIORITY_REFERRAL",
-                    reason_codes=reason_codes,
-                    engine_result=image_result,
-                    protocol_version=proto_ver,
-                )
-            # Suspicious alone -> STANDARD
-            return EyeReferralResult(
-                laterality=laterality,
-                decision="STANDARD_REFERRAL",
-                reason_codes=reason_codes,
-                engine_result=image_result,
-                protocol_version=proto_ver,
-            )
-
-        # ── NORMAL-LIKE path ─────────────────────────────────────────
-        if image_result == ENGINE_NORMAL:
-            if has_clinical_sign:
-                reason_codes.append("CLINICAL_SIGN")
-
-            # Two or more quantitative domains abnormal -> PRIORITY
-            if n_abnormal >= 2:
-                reason_codes.extend(abnormal_quant)
-                reason_codes.append("TWO_DOMAIN_ABNORMAL")
-                return EyeReferralResult(
-                    laterality=laterality,
-                    decision="PRIORITY_REFERRAL",
-                    reason_codes=reason_codes,
-                    engine_result=image_result,
-                    protocol_version=proto_ver,
-                )
-
-            # Isolated abnormality — repeat logic
-            if n_abnormal == 1:
-                reason_codes.extend(abnormal_quant)
-                if self._repeat_required_on_isolated() and repeat_count < 2:
-                    # First reading: require repeat before final decision
-                    reason_codes.append("REPEAT_REQUIRED")
-                    return EyeReferralResult(
-                        laterality=laterality,
-                        decision="STANDARD_REFERRAL",
-                        reason_codes=reason_codes,
-                        engine_result=image_result,
-                        repeat_required=True,
-                        protocol_version=proto_ver,
-                    )
-                else:
-                    # Abnormality confirmed after repeat
-                    return EyeReferralResult(
-                        laterality=laterality,
-                        decision="STANDARD_REFERRAL",
-                        reason_codes=reason_codes,
-                        engine_result=image_result,
-                        protocol_version=proto_ver,
-                    )
-
-            # Clinical sign alone with otherwise normal
-            if has_clinical_sign:
-                return EyeReferralResult(
-                    laterality=laterality,
-                    decision="STANDARD_REFERRAL",
-                    reason_codes=reason_codes,
-                    engine_result=image_result,
-                    protocol_version=proto_ver,
-                )
-
-            # All domains normal
-            return EyeReferralResult(
-                laterality=laterality,
-                decision="SCREEN_NEGATIVE",
-                reason_codes=reason_codes,
-                engine_result=image_result,
-                protocol_version=proto_ver,
-            )
-
-        # Unexpected engine result
-        log.warning("evaluate_eye: unexpected engine result %r — flagging MANUAL_REVIEW", image_result)
-        return EyeReferralResult(
-            laterality=laterality,
-            decision="MANUAL_REVIEW",
-            reason_codes=["MEASUREMENT_MISSING"],
-            engine_result=image_result,
-            protocol_version=proto_ver,
-        )
-
-    # ------------------------------------------------------------------
-    # Child-level decision
-    # ------------------------------------------------------------------
+        del repeat_count  # the initial protocol replaces readings instead of storing repeats
+        if image_status is None:
+            image_status = {
+                ENGINE_NORMAL: "NORMAL_LIKE",
+                ENGINE_SUSPICIOUS: "SUSPICIOUS",
+            }.get(image_result, "IMAGE_REJECTED")
+            # Old calls lacked K1; retain read compatibility but never use this
+            # path in the active UI/service workflow.
+            legacy_missing_k1 = measurements.get("k1_d") is None
+            if legacy_missing_k1:
+                measurements = dict(measurements, k1_d=measurements.get("k2_d"))
+        data = EyeScreeningInput.from_mapping(laterality, measurements, image_status, kerascan_image_id)
+        return self.evaluate_input(data, engine_result=image_result)
 
     def evaluate_child(
         self,
         od_result: EyeReferralResult,
         os_result: EyeReferralResult,
-        od_measurements: dict | None = None,
-        os_measurements: dict | None = None,
+        od_measurements: dict[str, Any] | None = None,
+        os_measurements: dict[str, Any] | None = None,
     ) -> ChildReferralResult:
-        """
-        Derive child-level decision from OD and OS eye results.
-        If either eye is referred, the child is referred.
-
-        Inter-eye K2 asymmetry check is also applied here.
-        """
-        proto_ver = self.get_protocol_version()
-        child_reason_codes: list[str] = []
-        inter_eye_asymmetry = False
-
-        # Inter-eye K2 asymmetry
-        if od_measurements and os_measurements:
-            od_k2 = od_measurements.get("k2_d")
-            os_k2 = os_measurements.get("k2_d")
-            if od_k2 is not None and os_k2 is not None:
-                diff = abs(float(od_k2) - float(os_k2))
-                if diff >= self._k2_asymmetry_threshold():
-                    inter_eye_asymmetry = True
-                    child_reason_codes.append("INTER_EYE_ASYMMETRY")
-
-        # Priority order: PRIORITY > STANDARD > RECAPTURE > INCOMPLETE > SCREEN_NEGATIVE
-        priority_map = {
-            "PRIORITY_REFERRAL":  5,
-            "STANDARD_REFERRAL":  4,
-            "RECAPTURE_REQUIRED": 3,
-            "INCOMPLETE":         2,
-            "MANUAL_REVIEW":      1,
-            "SCREEN_NEGATIVE":    0,
-        }
-
-        od_score = priority_map.get(od_result.decision, 0)
-        os_score = priority_map.get(os_result.decision, 0)
-        winner = od_result if od_score >= os_score else os_result
-        child_decision = winner.decision
-
-        # Referral priority label
-        if child_decision == "PRIORITY_REFERRAL":
-            referral_priority = "PRIORITY"
-        elif child_decision == "STANDARD_REFERRAL":
-            referral_priority = "STANDARD"
-        elif inter_eye_asymmetry and child_decision == "SCREEN_NEGATIVE":
-            # Asymmetry alone escalates to standard referral
-            child_decision = "STANDARD_REFERRAL"
-            referral_priority = "STANDARD"
-        else:
-            referral_priority = "NONE"
-
+        """Aggregate only completed eyes; incomplete input always remains incomplete."""
+        del od_measurements, os_measurements
+        results = [od_result, os_result]
+        proto = self.get_protocol_version()
+        if any(result.action == "INCOMPLETE" for result in results):
+            reasons = [code for result in results for code in result.reason_codes]
+            return ChildReferralResult(
+                decision="INCOMPLETE_SCREENING",
+                action="INCOMPLETE",
+                referral_priority="NONE",
+                od_result=od_result,
+                os_result=os_result,
+                reason_codes=list(dict.fromkeys(reasons)),
+                protocol_version=proto,
+                explanation="Complete valid KeraScan image verification and all required measurements for both eyes.",
+            )
+        referral_eyes = [result.laterality for result in results if result.action == "REFER"]
+        if referral_eyes:
+            priority = "PRIORITY_1" if any(result.priority == "PRIORITY_1" for result in results) else "PRIORITY_2"
+            reasons = [code for result in results if result.action == "REFER" for code in result.reason_codes]
+            return ChildReferralResult(
+                decision="SCREEN_POSITIVE",
+                action="REFER",
+                referral_priority=priority,
+                od_result=od_result,
+                os_result=os_result,
+                reason_codes=list(dict.fromkeys(reasons)),
+                affected_eyes=referral_eyes,
+                protocol_version=proto,
+                explanation="At least one eye met the KeraScan school-screening referral criteria.",
+            )
+        if any(result.action == "REPEAT_MEASUREMENT" for result in results):
+            return ChildReferralResult(
+                decision="REPEAT_REQUIRED",
+                action="REPEAT_MEASUREMENT",
+                referral_priority="NONE",
+                od_result=od_result,
+                os_result=os_result,
+                reason_codes=[code for result in results for code in result.reason_codes],
+                protocol_version=proto,
+                explanation="One isolated quantitative screening parameter was abnormal. Repeat the measurement before finalizing.",
+            )
         return ChildReferralResult(
-            decision=child_decision,
-            referral_priority=referral_priority,
+            decision="SCREEN_NEGATIVE",
+            action="NO_IMMEDIATE_REFERRAL",
+            referral_priority="NONE",
             od_result=od_result,
             os_result=os_result,
-            reason_codes=child_reason_codes,
-            inter_eye_asymmetry=inter_eye_asymmetry,
-            protocol_version=proto_ver,
+            protocol_version=proto,
+            explanation="No KeraScan screening criterion was positive at this encounter.",
         )

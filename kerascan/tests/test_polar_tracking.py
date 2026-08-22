@@ -174,6 +174,7 @@ def test_engine_uses_single_acquisition_score_and_skips_without_verified_hardwar
     unconfigured = KerascanEngine().analyze(image)
     assert unconfigured["classification_skipped"] is True
     assert unconfigured["failure_stage"] == "CONFIGURATION"
+    assert unconfigured["screening_result"] == "ANALYSIS_BLOCKED"
     configured = KerascanEngine(EngineConfig(radial=RadialConfig(expected_ring_count=8, meridians=180))).analyze(image)
     assert configured["classification_performed"] is False
     assert configured["classification_skipped"] is True

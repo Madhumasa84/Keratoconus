@@ -7,6 +7,11 @@ def redact_path(path) -> str:
 
 def redact_paths(value):
     if isinstance(value, dict):
-        return {key: (redact_path(item) if key.endswith("_path") and item else redact_paths(item)) for key,item in value.items()}
+        # Artifact manifests use a plain ``path`` key; redact it as strictly as
+        # historic ``*_path`` fields so exports never disclose local layout.
+        return {
+            key: (redact_path(item) if (key == "path" or key.endswith("_path")) and item else redact_paths(item))
+            for key, item in value.items()
+        }
     if isinstance(value, list): return [redact_paths(item) for item in value]
     return value

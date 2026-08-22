@@ -10,11 +10,6 @@ def test_phase1_engine_importable():
     assert EngineConfig is not None
 
 
-def test_engine_fits_synthetic_baseline(kerascan_engine):
-    assert kerascan_engine.model is not None
-    assert kerascan_engine.model_metadata is not None
-    assert "model_hash" in kerascan_engine.model_metadata
-
 
 def test_engine_result_has_required_keys(kerascan_engine, sample_normal_image):
     result = kerascan_engine.analyze(sample_normal_image)
@@ -30,26 +25,27 @@ def test_blank_image_returns_ungradable(kerascan_engine, blank_image):
 
 def test_screening_result_is_valid_label(kerascan_engine, sample_normal_image):
     result = kerascan_engine.analyze(sample_normal_image)
-    assert result["screening_result"] in ("SUSPICIOUS", "NORMAL-LIKE", "UNGRADABLE")
+    assert result["screening_result"] in ("SUSPICIOUS", "NORMAL-LIKE", "UNGRADABLE", "NOT_CALIBRATED", "ANALYSIS_BLOCKED")
 
 
-def test_engine_analysis_failure_handled_gracefully(tmp_path):
-    """ScreeningService catches engine errors and returns UNGRADABLE."""
+def test_engine_analysis_failure_is_an_explicit_image_rejection(tmp_path):
+    """A missing local file cannot be reinterpreted as a normal image."""
     from app.services.screening_service import ScreeningService
     svc = ScreeningService()
     result = svc._analyse_image("/nonexistent/path/image.png")
     assert result["screening_result"] == "UNGRADABLE"
-    assert "engine_error" in result["quality"]["flags"] or "Engine error" in result.get("message", "")
+    assert result["image_status"] == "IMAGE_REJECTED"
+    assert "rejected" in result.get("message", "").lower()
 
 
-def test_incorrect_image_format_handled(kerascan_engine, tmp_path):
-    """Non-image file returns UNGRADABLE without crash."""
+def test_incorrect_image_format_is_rejected_without_crash(kerascan_engine, tmp_path):
     bad_file = tmp_path / "bad.png"
     bad_file.write_text("this is not a valid image file")
     from app.services.screening_service import ScreeningService
     svc = ScreeningService()
     result = svc._analyse_image(str(bad_file))
     assert result["screening_result"] == "UNGRADABLE"
+    assert result["image_status"] == "IMAGE_REJECTED"
 
 
 def test_model_and_pipeline_version_captured(kerascan_engine, sample_normal_image):

@@ -62,7 +62,6 @@ def engine_config():
 def kerascan_engine(engine_config):
     from kerascan import KerascanEngine
     eng = KerascanEngine(engine_config)
-    eng.fit_synthetic_baseline(n=200)
     return eng
 
 

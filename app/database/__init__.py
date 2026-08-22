@@ -69,7 +69,53 @@ def init_db() -> None:
             if legacy_table in table_names:
                 connection.execute(text(f'DROP TABLE "{legacy_table}"'))
             connection.execute(text("INSERT OR IGNORE INTO schema_migrations(version) VALUES ('phase3-0.1.0')"))
+            # Phase 4 is deliberately additive: historic measurements stay in
+            # place and cannot be silently selected for new protocol decisions.
+            _apply_school_screening_migration(connection)
     log.info("init_db: complete")
+
+
+def _apply_school_screening_migration(connection) -> None:
+    """Add Phase-4 columns to existing local SQLite databases safely."""
+    additions = {
+        "screenings": {
+            "overall_action": "VARCHAR(32)",
+            "affected_eyes": "TEXT",
+            "pdf_generated": "INTEGER NOT NULL DEFAULT 0",
+            "pdf_sha256": "VARCHAR(64)",
+            "report_identifier": "VARCHAR(64)",
+            "software_version": "VARCHAR(64)",
+        },
+        "eyes": {
+            "kerascan_image_id": "VARCHAR(64)",
+            "image_status": "VARCHAR(48)",
+            "image_failure_stage": "VARCHAR(48)",
+            "image_message": "TEXT",
+            "processed_output_hashes": "TEXT",
+            "analysis_artifacts": "TEXT",
+            "analysis_provenance_hash": "VARCHAR(64)",
+            "geometry_validation_status": "VARCHAR(16)",
+        },
+        "measurements": {
+            "pachymetry_measurement_type": "VARCHAR(24)",
+        },
+        "image_analysis": {
+            "model_version": "VARCHAR(64)",
+            "image_status": "VARCHAR(48)",
+            "failure_stage": "VARCHAR(48)",
+            "geometry_validation_status": "VARCHAR(16)",
+            "original_image_hash": "VARCHAR(64)",
+            "processed_output_hashes": "TEXT",
+            "artifact_manifest": "TEXT",
+            "provenance_hash": "VARCHAR(64)",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {row[1] for row in connection.execute(text(f'PRAGMA table_info("{table}")'))}
+        for column, definition in columns.items():
+            if column not in existing:
+                connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}'))
+    connection.execute(text("INSERT OR IGNORE INTO schema_migrations(version) VALUES ('phase4-school-screening-provisional-1')"))
 
 
 __all__ = ["engine", "SessionLocal", "Base", "init_db"]

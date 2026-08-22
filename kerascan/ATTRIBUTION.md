@@ -10,6 +10,8 @@ KERASCAN modifications and non-reuse boundaries:
 - It accepts PNG/JPEG/TIFF/RGBA images and performs full-resolution, full-eye ROI detection before any ring analysis.
 - It removes SmartKC-specific assumptions including 3000×4000 inputs, 500×500 crops, `(250, 250)` centres, 22/20 mire counts, zoom undoing, fixed working distance, Android workflow, pretrained weights, and camera geometry.
 - It uses the estimated centre in every geometric operation and preserves missing radial points as `NaN`.
+- The original radial/graph inspiration has been further reworked into bounded centre refinement, polar intensity unwrapping, one-dimensional bright-band centreline peaks, ordered dynamic alignment, explicit duplicate rejection, and separately marked short-gap interpolation. Binary connected components are not used as ring identities.
+- It enforces positive image-space radial ordering before feature extraction. No physical units are claimed without KERASCAN calibration, and an unverified hardware ring count permits engineering review only—not automated classifier use.
 - Its traditional segmentation is default; a U-Net is only an externally supplied adapter, with no claim that SmartKC weights generalise to KERASCAN.
 - It contains no Arc-Step calculation, physical curvature claim, clinical labels, or SmartKC clinical-label reuse.
 

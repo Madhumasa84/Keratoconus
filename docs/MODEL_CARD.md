@@ -10,7 +10,7 @@ Not a diagnosis, not a replacement for specialist assessment, and not physical c
 
 ## Data and validation
 
-The committed prototype uses synthetic development data only. Confidential datasets remain local. A frozen model bundle records feature schema, threshold, pipeline version, partition provenance, and a file hash. Accuracy must not be claimed above 95% until independently observed on an untouched patient-level locked test set.
+The committed prototype uses synthetic development data only. Confidential datasets remain local. A frozen model bundle records feature schema, threshold, pipeline version, partition provenance, and a file hash. No clinical performance or deployment-suitability claim is authorized from synthetic development data; any future claim requires a prospectively approved validation protocol and independent evaluation on an untouched patient-level locked test set.
 
 ## Evaluation requirements
 

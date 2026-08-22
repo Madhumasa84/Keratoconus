@@ -14,15 +14,37 @@ class ROIConfig:
 
 @dataclass(frozen=True)
 class QualityConfig:
+    # When False, acquisition quality is measured and reported but never blocks
+    # the pipeline. Intended for workflows where a clinician has already
+    # visually selected the capture before upload.
+    enforce_gate: bool = True
+    # Minimum bright-to-dark swing across the ring band for the located region
+    # to be accepted as an actual Placido mire pattern. This is NOT a quality
+    # judgement and is enforced even when enforce_gate is False: below it the
+    # analysis is measuring skin, eyelashes or eyebrow rather than a cornea,
+    # and a result computed from those is meaningless rather than merely poor.
+    # Calibrated on this project's sample photos, where confirmed skin-locked
+    # detections scored 40-48 and every genuine cornea scored 80 or above.
+    min_mire_contrast_amplitude: float = 65.0
     min_roi_side_px: int = 180
+    # Rejection threshold: Laplacian variance below this level is REJECTED
     min_laplacian_variance: float = 20.0
+    # Warning fraction: Laplacian between (min * warning_fraction) and min is WARNING
+    # Laplacian below (min * warning_fraction) is REJECTED
+    warning_laplacian_fraction: float = 0.40
     min_mean_intensity: float = 24.0
     min_contrast: float = 18.0
+    # Warning fraction: contrast between (min * warning_fraction) and min is WARNING
+    warning_contrast_fraction: float = 0.55
     max_saturation_fraction: float = 0.12
     max_noise_sigma: float = 28.0
     min_centring_ratio: float = 0.18
     min_angular_coverage: float = 0.42
     min_ring_fraction: float = 0.008
+    # Minimum downstream tracking confidence for ACCEPTABLE_WITH_WARNING
+    min_warning_tracking_confidence: float = 0.50
+    # Minimum direct observation coverage for ACCEPTABLE_WITH_WARNING
+    min_warning_direct_coverage: float = 0.55
 
 
 @dataclass(frozen=True)
@@ -50,6 +72,11 @@ class RadialConfig:
     meridians: int = 240
     expected_ring_count: int | None = None  # Requires verified device/hardware confirmation.
     require_verified_ring_count_for_classification: bool = True
+    # When True, the number of rings actually reconstructed from this capture is
+    # used as the analysis basis instead of a pre-configured hardware count. The
+    # assessment is then self-consistent for the rings genuinely observed; it is
+    # explicitly NOT a verified hardware configuration and is reported as such.
+    accept_detected_ring_count: bool = False
     max_rings: int = 24  # Safety cap only; never interpreted as hardware ring count.
     min_radius_fraction: float = 0.06
     radial_sample_step: float = 0.75
@@ -80,15 +107,34 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class GeometryThresholds:
-    # Intentionally empty: no clinical cutoffs invented.
-    pass
+    # No clinical cutoffs are defined here. A caller may supply bounds (see
+    # app/services/screening_service.py for the app-layer provisional,
+    # non-clinical, distribution-derived thresholds it opts into); the engine
+    # itself never invents or defaults to any.
+    version: str = "none"
+    suspicious_bounds: dict = field(default_factory=dict)
+    indeterminate_bounds: dict = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class GeometryConfig:
+    # Engineering persistence and completeness rules only. These are not
+    # clinical disease thresholds and cannot produce a calibrated conclusion.
+    compression_magnitude_fraction: float = 0.05
+    expansion_magnitude_fraction: float = 0.05
+    min_coherent_pair_run: int = 2
+    min_sector_angular_samples: int = 3
+    max_missing_sector_fraction: float = 0.20
+    # Engineering-only persistence controls for self-fitted reference
+    # residuals. They are not clinical disease thresholds.
+    reference_deviation_magnitude_fraction: float = 0.08
+    min_coherent_ring_run: int = 2
+    min_reference_sector_angular_samples: int = 3
     thresholds: GeometryThresholds | None = None
 
 @dataclass(frozen=True)
 class EngineConfig:
+    hardware_version: str = "unknown"
+    ring_count_source: str = "unknown"
     roi: ROIConfig = field(default_factory=ROIConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
@@ -97,4 +143,4 @@ class EngineConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
-    pipeline_version: str = "phase1-0.2.0-polar-tracking"
+    pipeline_version: str = "phase1-0.4.0-reference-geometry"

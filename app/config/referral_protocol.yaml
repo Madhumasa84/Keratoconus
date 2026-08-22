@@ -1,38 +1,26 @@
-version: '3.0.0'
-effective_date: '2026-08-21'
-approval_status: provisional_defaults_pending_clinical_approval
+# KeraScan school-screening protocol. This is the single source of truth for
+# active UI labels, validation, referral rules, and report thresholds.
+protocol_version: "kerascan-school-screening-provisional-1"
+effective_date: "2026-08-21"
+approval_status: "provisional-study-protocol"
+initial_image_policy: "good-quality-only"
+require_od_image: true
+require_os_image: true
+require_complete_measurements: true
 
-keratometry:
-  metric: K2
-  high_threshold_d: 47.0
+k2_abnormal_above_d: 46.8
+pachymetry_abnormal_below_um: 480
+cylinder_magnitude_abnormal_above_d: 1.5
+pachymetry_measurement_type: "device_reported"
 
-pachymetry:
-  metric: central_or_thinnest_as_recorded
-  low_threshold_um: 480
+detailed_pdf_for_actions:
+  - "REFER"
 
-cylinder:
-  high_threshold_d: 2.0
-
-inter_eye_asymmetry:
-  k2_diff_threshold_d: 1.5
-
-repeat_policy:
-  required_on_isolated_abnormality: true
-  max_readings: 3
-  min_readings_for_final: 2
-
-required_fields:
-  - screening_id
-  - age
-  - sex
-  - site
-  - screening_date
-  - operator_id
-  - device_id
-  - consent_recorded
-  - od_image
-  - os_image
+# This software version is intentionally distinct from the image-pipeline and
+# model versions, which are recorded from the exact image-analysis run.
+software_version: "phase4-school-screening"
 
 disclaimer: >
-  AI-assisted keratoconus screening result. This is not a confirmed diagnosis.
-  Suspicious screening result—further corneal evaluation is recommended.
+  KeraScan is an experimental initial screening aid. This report does not
+  diagnose or exclude keratoconus. A screen-positive result indicates that
+  further ophthalmic evaluation is recommended outside this application.

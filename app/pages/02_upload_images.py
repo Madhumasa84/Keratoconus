@@ -1,134 +1,162 @@
-"""Page 2 — Upload OD/OS images and review ROI."""
-import sys, hashlib, os
+"""Mandatory bilateral KeraScan upload and image-gate page."""
+from __future__ import annotations
+
+import hashlib
+import os
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "kerascan" / "src"))
 
 import streamlit as st
-from PIL import Image
-import numpy as np
 
-st.set_page_config(page_title="Upload Images — KERASCAN", layout="wide")
 from app.services.ui_security import require_authenticated
-require_authenticated(st)
-st.title("🖼 Upload OD & OS Images")
 
-st.warning(
-    "**Do NOT rely on image appearance to determine laterality. "
-    "The operator must explicitly select OD (right eye) or OS (left eye) for each image.**",
-    icon="⚠️"
-)
+st.set_page_config(page_title="Upload Images — KeraScan", layout="wide")
+require_authenticated(st)
+st.title("Upload Images")
+st.caption("Upload one image for each eye.")
+with st.expander("How to take a good photo"):
+    st.markdown(
+        """
+1. **Fill the frame with the rings** — move close; the ring pattern should be the
+   largest thing in the picture, not a small circle in a face photo.
+2. **Hold the device flat and square to the eye.** Tilting makes the round rings
+   photograph as ovals, which looks like corneal irregularity when it is not.
+3. **Hold the upper eyelid open** and ask the child to look straight at the centre.
+   Eyelashes covering the rings are the most common reason a photo cannot be used.
+4. **Avoid glare** from windows and overhead lights, and hold steady.
+"""
+    )
 
 if not st.session_state.get("current_screening"):
     st.error("Complete Step 1 (New Screening) first.")
     st.stop()
 
+from app.services.screening_service import ScreeningService
+
 screening = st.session_state["current_screening"]
 screening_id = screening.get("screening_id", "unknown")
-img_dir = Path(os.environ.get("KERASCAN_LOCAL_IMAGE_DIR", str(Path.home() / ".kerascan" / "images"))) / screening_id
-img_dir.mkdir(parents=True, exist_ok=True)
+image_dir = Path(os.environ.get("KERASCAN_LOCAL_IMAGE_DIR", str(Path.home() / ".kerascan" / "images"))) / screening_id
+image_dir.mkdir(parents=True, exist_ok=True)
+analysis_root = image_dir / "analysis"
+ALLOWED_TYPES = ["png", "jpg", "jpeg", "tif", "tiff"]
 
-ALLOWED_TYPES = ["png", "jpg", "jpeg", "bmp", "tiff"]
 
-def save_and_analyse(uploaded_file, laterality: str):
-    """Save image and run ROI detection."""
-    suffix = Path(uploaded_file.name).suffix.lower()
-    save_path = img_dir / f"{laterality.lower()}_original{suffix}"
-    save_path.write_bytes(uploaded_file.getbuffer())
+_READY_MESSAGE = {
+    "NORMAL_LIKE": "Image analysed.",
+    "SUSPICIOUS": "Image analysed.",
+    "INDETERMINATE": "Image analysed.",
+}
 
-    try:
-        img = Image.open(save_path).convert("RGB")
-        st.image(img, caption=f"{laterality} — {uploaded_file.name} ({uploaded_file.size // 1024} KB)", width=300)
-    except Exception as e:
-        st.error(f"Cannot read image: {e}")
-        return None
+_RETAKE_MESSAGE = {
+    "IMAGE_REJECTED": "This image could not be used.",
+    "SEGMENTATION_FAILED": "The ring pattern could not be found in this photo.",
+    "TRACKING_FAILED": "Too much of the ring pattern is hidden in this photo.",
+    "ANALYSIS_BLOCKED": "This image could not be analysed.",
+}
 
-    return str(save_path)
+# What the operator should physically change, keyed on why the image failed.
+# Ordered by how much difference the correction makes.
+_RETAKE_ACTION = (
+    ("no_placido_pattern_located", "Point the device at the cornea — the rings were not found in this photo."),
+    ("placido_pattern_too_small", "Move the device closer so the rings fill the frame."),
+    ("pattern_off_centre", "Centre the ring pattern in the frame."),
+    ("possible_eyelid_or_eyelash_obstruction", "Hold the upper eyelid open and ask the child to look straight at the centre."),
+    ("glare_or_saturation", "Reduce glare — angle away from windows and overhead lights."),
+    ("underexposed", "More light is needed on the eye."),
+    ("blur", "Hold the device steady and retake."),
+    ("mild_blur", "Hold the device steady and retake."),
+    ("low_contrast", "Increase lighting contrast on the ring pattern."),
+    ("sensor_noise", "More light is needed; the image is noisy."),
+)
 
-col_od, col_os = st.columns(2)
 
-with col_od:
-    st.subheader("Right Eye (OD)")
-    od_file = st.file_uploader("Upload OD image", type=ALLOWED_TYPES, key="od_upload")
-    if od_file:
-        path = save_and_analyse(od_file, "OD")
-        if path:
-            st.session_state["od_image_path"] = path
-            st.success(f"OD image saved: {Path(path).name}")
+def _retake_actions(verification) -> list[str]:
+    """Concrete corrections for this photo, derived from why it actually failed."""
+    raw = verification.raw_result or {}
+    flags = set((raw.get("acquisition_quality") or {}).get("flags") or [])
+    flags |= set((raw.get("segmentation") or {}).get("flags") or [])
+    flags |= set((raw.get("tracking") or {}).get("flags") or [])
+    actions = [text for flag, text in _RETAKE_ACTION if flag in flags]
+    if not actions:
+        # Partial ring coverage is the common failure: the rings are there but
+        # the lid, lashes or framing hide too much of them.
+        actions.append(
+            "Move closer so the rings fill the frame, hold the device flat and square to the eye, "
+            "and hold the upper eyelid open."
+        )
+    return actions
 
-            # ROI detection
-            if st.button("Detect OD ROI", key="detect_od"):
-                with st.spinner("Detecting OD ROI..."):
-                    try:
-                        from kerascan import EngineConfig, KerascanEngine
-                        engine = KerascanEngine()
-                        img_arr = np.array(Image.open(path).convert("RGB"))
-                        result = engine.analyze(img_arr)
-                        roi = result.get("roi", {})
-                        st.session_state["od_roi"] = roi
-                        st.success(f"ROI detected: method={roi.get('method')} confidence={roi.get('confidence', 0):.2f}")
-                        st.json(roi)
-                    except Exception as e:
-                        st.warning(f"ROI detection failed: {e}. Use manual adjustment below.")
 
-            # Manual ROI
-            with st.expander("Manual ROI Adjustment"):
-                st.caption("Adjust crop coordinates if automatic detection failed.")
-                try:
-                    img_pil = Image.open(path)
-                    w, h = img_pil.size
-                except Exception:
-                    w, h = 640, 480
-                x0 = st.slider("OD x0", 0, w, 0, key="od_x0")
-                y0 = st.slider("OD y0", 0, h, 0, key="od_y0")
-                x1 = st.slider("OD x1", 0, w, w, key="od_x1")
-                y1 = st.slider("OD y1", 0, h, h, key="od_y1")
-                if st.button("Apply manual OD ROI"):
-                    st.session_state["od_roi"] = {"box_xyxy": [x0, y0, x1, y1], "method": "manual"}
-                    st.success("Manual OD ROI applied.")
+def _status_text(verification) -> None:
+    """Show whether this eye is ready, without exposing internal pipeline stages."""
+    status = verification.image_status
+    if status in _READY_MESSAGE:
+        st.success(_READY_MESSAGE[status])
+        return
+    st.error(_RETAKE_MESSAGE.get(status, "This image could not be used."))
+    for action in _retake_actions(verification):
+        st.write(f"- {action}")
 
-with col_os:
-    st.subheader("Left Eye (OS)")
-    os_file = st.file_uploader("Upload OS image", type=ALLOWED_TYPES, key="os_upload")
-    if os_file:
-        path = save_and_analyse(os_file, "OS")
-        if path:
-            st.session_state["os_image_path"] = path
-            st.success(f"OS image saved: {Path(path).name}")
 
-            if st.button("Detect OS ROI", key="detect_os"):
-                with st.spinner("Detecting OS ROI..."):
-                    try:
-                        from kerascan import EngineConfig, KerascanEngine
-                        engine = KerascanEngine()
-                        img_arr = np.array(Image.open(path).convert("RGB"))
-                        result = engine.analyze(img_arr)
-                        roi = result.get("roi", {})
-                        st.session_state["os_roi"] = roi
-                        st.success(f"ROI detected: method={roi.get('method')} confidence={roi.get('confidence', 0):.2f}")
-                        st.json(roi)
-                    except Exception as e:
-                        st.warning(f"ROI detection failed: {e}. Use manual adjustment below.")
+def _save_and_verify(uploaded, eye: str):
+    suffix = Path(uploaded.name).suffix.lower()
+    content = uploaded.getvalue()
+    content_hash = hashlib.sha256(content).hexdigest()
+    hash_key = f"{eye.lower()}_upload_content_hash"
+    path_key = f"{eye.lower()}_image_path"
+    verification_key = f"{eye.lower()}_image_verification"
+    destination = image_dir / f"{eye.lower()}_original{suffix}"
+    if st.session_state.get(hash_key) != content_hash or not destination.exists():
+        destination.write_bytes(content)
+        service = ScreeningService()
+        verification = service.verify_image(destination, eye, analysis_root / eye)
+        st.session_state[hash_key] = content_hash
+        st.session_state[path_key] = str(destination)
+        st.session_state[verification_key] = verification
+        # Any new image invalidates a prior child-level result and confirmation.
+        st.session_state["analysis_result"] = None
+        st.session_state["decision_confirmed"] = False
+    return st.session_state.get(verification_key)
 
-            with st.expander("Manual ROI Adjustment"):
-                try:
-                    img_pil = Image.open(path)
-                    w, h = img_pil.size
-                except Exception:
-                    w, h = 640, 480
-                x0 = st.slider("OS x0", 0, w, 0, key="os_x0")
-                y0 = st.slider("OS y0", 0, h, 0, key="os_y0")
-                x1 = st.slider("OS x1", 0, w, w, key="os_x1")
-                y1 = st.slider("OS y1", 0, h, h, key="os_y1")
-                if st.button("Apply manual OS ROI"):
-                    st.session_state["os_roi"] = {"box_xyxy": [x0, y0, x1, y1], "method": "manual"}
-                    st.success("Manual OS ROI applied.")
+
+columns = st.columns(2)
+for column, eye in ((columns[0], "OD"), (columns[1], "OS")):
+    with column:
+        st.subheader("Right eye (OD)" if eye == "OD" else "Left eye (OS)")
+        uploaded = st.file_uploader("Choose image", type=ALLOWED_TYPES, key=f"{eye.lower()}_upload")
+        if uploaded is None:
+            continue
+        st.image(uploaded, use_container_width=True)
+        verification = _save_and_verify(uploaded, eye)
+        if verification is not None:
+            _status_text(verification)
 
 st.divider()
-od_ready = bool(st.session_state.get("od_image_path"))
-os_ready = bool(st.session_state.get("os_image_path"))
-if od_ready and os_ready:
-    st.success("Both images uploaded. Proceed to measurements.")
-    st.page_link("pages/03_measurements.py", label="→ Enter Measurements")
+od = st.session_state.get("od_image_verification")
+os = st.session_state.get("os_image_verification")
+if od is None or os is None:
+    st.caption("Upload an image for each eye to continue.")
+elif od.original_image_hash == os.original_image_hash:
+    st.error("The same file was used for both eyes. Upload the correct image for each eye.")
 else:
-    st.info(f"OD: {'✓' if od_ready else '✗'}  |  OS: {'✓' if os_ready else '✗'}  — Upload both images to continue.")
+    unread = [
+        "right" if eye is od else "left"
+        for eye in (od, os)
+        if eye.image_status not in _READY_MESSAGE
+    ]
+    if unread:
+        # Never a dead end: replacing the photo is the better option, but the
+        # operator can still record measurements and finish. An eye whose image
+        # did not analyse keeps the encounter INCOMPLETE in the referral engine,
+        # so continuing can never turn into a clean screen-negative.
+        st.warning(
+            f"The {' and '.join(unread)} eye image could not be analysed. "
+            "Uploading a clearer photo is recommended. You can still continue, "
+            "but the screening will be recorded as incomplete."
+        )
+        st.page_link("pages/03_measurements.py", label="Continue anyway →")
+    else:
+        st.page_link("pages/03_measurements.py", label="Next: enter measurements →")

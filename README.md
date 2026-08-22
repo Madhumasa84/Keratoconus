@@ -37,3 +37,16 @@ python -m kerascan.evaluate_locked --manifest /private/path/locked_test_manifest
 See [local evaluation instructions](docs/LOCAL_EVALUATION.md), [field deployment](docs/FIELD_DEPLOYMENT.md), [model card](docs/MODEL_CARD.md), [failure-mode register](docs/FAILURE_MODE_REGISTER.md), and [SmartKC attribution](kerascan/ATTRIBUTION.md).
 
 The software has no telemetry, cloud dependency, remote logging, or unauthenticated operator access. Do not use a locked-test evaluation to retune a model; a changed model requires a new untouched test set.
+
+## Initial image policy
+
+The initial school-screening workflow requires good-quality KeraScan images for
+both OD and OS, plus K1, K2, one protocol-defined pachymetry value, and
+cylinder for each eye. A missing, rejected, failed, or hardware-blocked image
+cannot yield a completed screen-negative result. Detailed local referral PDFs
+are generated only for final screen-positive `REFER` outcomes.
+
+Blur-versus-good-image comparison, synthetic blur robustness experiments, and
+clinical quality-threshold determination are deferred; see
+[future blur-evaluation work](docs/FUTURE_BLUR_EVALUATION.md). The present
+workflow does not sharpen or otherwise repair clinically unusable images.

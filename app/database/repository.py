@@ -137,6 +137,13 @@ class ScreeningRepository:
             "classification_skipped": engine_result.get("classification_skipped"),
             "pipeline_version": engine_result.get("pipeline_version"),
             "model_hash": (engine_result.get("model") or {}).get("model_hash"),
+            "model_version": (engine_result.get("model") or {}).get("model_hash"),
+            "image_status": engine_result.get("image_status"),
+            "failure_stage": engine_result.get("image_failure_stage") or engine_result.get("failure_stage"),
+            "geometry_validation_status": (engine_result.get("geometry_validation") or {}).get("status"),
+            "original_image_hash": engine_result.get("original_file_sha256"),
+            "processed_output_hashes": engine_result.get("processed_output_hashes"),
+            "provenance_hash": engine_result.get("analysis_provenance_hash"),
         }
         for k, v in defaults.items():
             data.setdefault(k, v)
@@ -278,6 +285,24 @@ class ScreeningRepository:
         self.log_audit("referrals", row.id, "INSERT", None, _row_to_dict(row), "system")
         log.debug("save_referral: id=%s", row.id)
         return row.id
+
+    def record_referral_pdf(self, screening_uuid: str, pdf_path: str, pdf_sha256: str) -> bool:
+        """Record PDF generation by hash without persisting an output location."""
+        stmt = select(Screening).where(Screening.id == screening_uuid)
+        row = self._s.scalars(stmt).first()
+        if row is None:
+            return False
+        old = _row_to_dict(row)
+        row.pdf_generated = True
+        row.pdf_sha256 = pdf_sha256
+        # New records deliberately retain only an integrity hash.  ``pdf_path``
+        # is a legacy nullable column kept so historic local records survive the
+        # migration; it is not populated by the new workflow.
+        del pdf_path
+        row.report_identifier = pdf_sha256[:16] if pdf_sha256 else None
+        self._s.flush()
+        self.log_audit("screenings", row.id, "UPDATE", old, _row_to_dict(row), "system")
+        return True
 
     # ------------------------------------------------------------------
     # Audit log

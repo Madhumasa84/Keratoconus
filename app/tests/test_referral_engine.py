@@ -1,226 +1,230 @@
-"""
-Unit tests for the KERASCAN Phase 2 referral engine.
-Tests all 22 required decision combinations.
-"""
+"""Decision-matrix regression tests for the provisional school protocol."""
+from __future__ import annotations
+
 import pytest
+
 from app.services.referral_engine import (
-    ReferralEngine, EyeReferralResult, ChildReferralResult,
-    VALID_REASON_CODES, VALID_OUTPUT_CODES,
-    ENGINE_SUSPICIOUS, ENGINE_NORMAL, ENGINE_UNGRADABLE,
+    ENGINE_NORMAL,
+    ENGINE_SUSPICIOUS,
+    EyeScreeningInput,
+    ReferralEngine,
+    VALID_OUTPUT_CODES,
+    VALID_REASON_CODES,
 )
 
 
-# Helpers
-NORMAL_MEAS = {
-    "k2_d": 44.0, "pachymetry_um": 530.0, "pachymetry_type": "central",
-    "cylinder_d": 0.5,
-}
-HIGH_K_MEAS = {
-    "k2_d": 48.0, "pachymetry_um": 530.0, "pachymetry_type": "central",
-    "cylinder_d": 0.5,
-}
-LOW_PACHY_MEAS = {
-    "k2_d": 44.0, "pachymetry_um": 470.0, "pachymetry_type": "central",
-    "cylinder_d": 0.5,
-}
-HIGH_CYL_MEAS = {
-    "k2_d": 44.0, "pachymetry_um": 530.0, "pachymetry_type": "central",
-    "cylinder_d": 2.5,
-}
-HIGH_K_LOW_PACHY = {
-    "k2_d": 48.0, "pachymetry_um": 470.0, "pachymetry_type": "central",
-    "cylinder_d": 0.5,
-}
-HIGH_K_HIGH_CYL = {
-    "k2_d": 48.0, "pachymetry_um": 530.0, "pachymetry_type": "central",
-    "cylinder_d": 3.0,
-}
-MISSING_K2 = {
-    "k2_d": None, "pachymetry_um": 530.0, "pachymetry_type": "central",
-    "cylinder_d": 0.5,
-}
-MISSING_PACHY = {
-    "k2_d": 44.0, "pachymetry_um": None, "pachymetry_type": None,
-    "cylinder_d": 0.5,
-}
+def measurements(**changes):
+    base = {"k1_d": 43.0, "k2_d": 44.0, "pachymetry_um": 530.0, "cylinder_d": 0.50}
+    base.update(changes)
+    return base
 
 
-# Test 01: Both eyes normal -> SCREEN_NEGATIVE
-def test_both_eyes_normal_screen_negative(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, NORMAL_MEAS)
-    os = referral_engine.evaluate_eye("OS", ENGINE_NORMAL, NORMAL_MEAS)
-    child = referral_engine.evaluate_child(od, os, NORMAL_MEAS, NORMAL_MEAS)
-    assert od.decision == "SCREEN_NEGATIVE"
-    assert os.decision == "SCREEN_NEGATIVE"
-    assert child.decision == "SCREEN_NEGATIVE"
+def evaluate(engine, eye="OD", image_status="NORMAL_LIKE", **changes):
+    return engine.evaluate_eye(
+        eye,
+        ENGINE_SUSPICIOUS if image_status == "SUSPICIOUS" else ENGINE_NORMAL,
+        measurements(**changes),
+        image_status=image_status,
+        kerascan_image_id=f"{eye}-image",
+    )
 
 
-# Test 02: OD SUSPICIOUS image -> STANDARD_REFERRAL with IMG_SUSPICIOUS
-def test_od_suspicious_standard_referral(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_SUSPICIOUS, NORMAL_MEAS)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "IMG_SUSPICIOUS" in od.reason_codes
+def test_protocol_uses_required_versioned_thresholds(referral_engine):
+    assert referral_engine.get_protocol_version() == "kerascan-school-screening-provisional-1"
+    assert referral_engine.thresholds == {
+        "k2_abnormal_above_d": 46.8,
+        "pachymetry_abnormal_below_um": 480.0,
+        "cylinder_magnitude_abnormal_above_d": 1.5,
+    }
+    assert referral_engine.protocol.pachymetry_measurement_type == "device_reported"
 
 
-# Test 03: SUSPICIOUS image alone (no quantitative abnormality) -> STANDARD_REFERRAL
-def test_suspicious_alone_is_standard_referral(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_SUSPICIOUS, NORMAL_MEAS)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "IMG_SUSPICIOUS" in od.reason_codes
-    assert "K_HIGH" not in od.reason_codes
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("k2_d", 46.8, "NORMAL"),
+        ("k2_d", 46.81, "ABNORMAL"),
+        ("pachymetry_um", 480.0, "NORMAL"),
+        ("pachymetry_um", 479.0, "ABNORMAL"),
+        ("cylinder_d", 1.50, "NORMAL"),
+        ("cylinder_d", -1.50, "NORMAL"),
+        ("cylinder_d", 1.51, "ABNORMAL"),
+        ("cylinder_d", -1.51, "ABNORMAL"),
+    ],
+)
+def test_measurement_boundary_behaviour(referral_engine, key, value, expected):
+    result = evaluate(referral_engine, **{key: value})
+    if key == "k2_d":
+        assert result.flags.keratometry == expected
+    elif key == "pachymetry_um":
+        assert result.flags.pachymetry == expected
+    else:
+        assert result.flags.refraction == expected
 
 
-# Test 04: SUSPICIOUS + K_HIGH -> PRIORITY_REFERRAL
-def test_suspicious_plus_k_high_priority(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_SUSPICIOUS, HIGH_K_MEAS)
-    assert od.decision == "PRIORITY_REFERRAL"
-    assert "IMG_SUSPICIOUS" in od.reason_codes
-    assert "K_HIGH" in od.reason_codes
+def test_k1_is_recorded_and_must_not_exceed_k2(referral_engine):
+    invalid = evaluate(referral_engine, k1_d=47.0, k2_d=46.0)
+    assert invalid.decision == "INCOMPLETE_SCREENING"
+    assert "MEASUREMENT_INVALID" in invalid.reason_codes
+    assert any("K1" in field for field in invalid.missing_or_invalid_fields)
 
 
-# Test 05: SUSPICIOUS + PACHY_LOW -> PRIORITY_REFERRAL
-def test_suspicious_plus_pachy_low_priority(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_SUSPICIOUS, LOW_PACHY_MEAS)
-    assert od.decision == "PRIORITY_REFERRAL"
-    assert "IMG_SUSPICIOUS" in od.reason_codes
-    assert "PACHY_LOW" in od.reason_codes
+@pytest.mark.parametrize(
+    ("image_status", "changes", "decision", "action", "priority", "required_codes"),
+    [
+        ("NORMAL_LIKE", {}, "SCREEN_NEGATIVE", "NO_IMMEDIATE_REFERRAL", "NONE", []),
+        ("SUSPICIOUS", {}, "SCREEN_POSITIVE_IMAGE_ONLY", "REFER", "PRIORITY_2", ["IMAGE_CLASSIFIER_SUSPICIOUS"]),
+        ("SUSPICIOUS", {"k2_d": 47.0}, "HIGH_RISK_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["IMAGE_CLASSIFIER_SUSPICIOUS", "K2_ABOVE_46_8_D"]),
+        ("SUSPICIOUS", {"pachymetry_um": 470.0}, "HIGH_RISK_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["PACHYMETRY_BELOW_480_UM"]),
+        ("SUSPICIOUS", {"cylinder_d": -2.0}, "HIGH_RISK_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["CYLINDER_MAGNITUDE_ABOVE_1_5_D"]),
+        ("NORMAL_LIKE", {"k2_d": 47.0, "pachymetry_um": 470.0}, "DISCORDANT_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["K2_ABOVE_46_8_D", "PACHYMETRY_BELOW_480_UM", "MULTIPLE_QUANTITATIVE_ABNORMALITIES"]),
+        ("NORMAL_LIKE", {"k2_d": 47.0, "cylinder_d": 2.0}, "DISCORDANT_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["K2_ABOVE_46_8_D", "CYLINDER_MAGNITUDE_ABOVE_1_5_D"]),
+        ("NORMAL_LIKE", {"pachymetry_um": 470.0, "cylinder_d": 2.0}, "DISCORDANT_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["PACHYMETRY_BELOW_480_UM", "CYLINDER_MAGNITUDE_ABOVE_1_5_D"]),
+        ("NORMAL_LIKE", {"k2_d": 47.0, "pachymetry_um": 470.0, "cylinder_d": 2.0}, "DISCORDANT_SCREEN_POSITIVE", "REFER", "PRIORITY_1", ["MULTIPLE_QUANTITATIVE_ABNORMALITIES"]),
+        ("NORMAL_LIKE", {"k2_d": 47.0}, "INDETERMINATE_SINGLE_PARAMETER", "REPEAT_MEASUREMENT", "NONE", ["K2_ABOVE_46_8_D"]),
+    ],
+)
+def test_complete_per_eye_matrix(referral_engine, image_status, changes, decision, action, priority, required_codes):
+    result = evaluate(referral_engine, image_status=image_status, **changes)
+    assert result.decision == decision
+    assert result.action == action
+    assert result.priority == priority
+    assert set(required_codes).issubset(result.reason_codes)
 
 
-# Test 06: NORMAL-LIKE + K_HIGH + PACHY_LOW -> PRIORITY_REFERRAL
-def test_normal_k_high_pachy_low_priority(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, HIGH_K_LOW_PACHY)
-    assert od.decision == "PRIORITY_REFERRAL"
-    assert "K_HIGH" in od.reason_codes
-    assert "PACHY_LOW" in od.reason_codes
+@pytest.mark.parametrize("image_status", [
+    "IMAGE_REJECTED", "SEGMENTATION_FAILED", "TRACKING_FAILED", "ANALYSIS_BLOCKED", "MISSING",
+])
+def test_noncompleted_image_can_never_be_normal(referral_engine, image_status):
+    result = evaluate(referral_engine, image_status=image_status)
+    assert result.decision == "INCOMPLETE_SCREENING"
+    assert result.action == "INCOMPLETE"
+    assert result.image_status == image_status
+    assert result.decision != "SCREEN_NEGATIVE"
 
 
-# Test 07: NORMAL-LIKE + K_HIGH + CYL_HIGH -> PRIORITY_REFERRAL with TWO_DOMAIN_ABNORMAL
-def test_normal_two_domains_priority(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, HIGH_K_HIGH_CYL)
-    assert od.decision == "PRIORITY_REFERRAL"
-    assert "TWO_DOMAIN_ABNORMAL" in od.reason_codes
+@pytest.mark.parametrize("missing_key", ["k1_d", "k2_d", "pachymetry_um", "cylinder_d"])
+def test_missing_mandatory_measurement_is_incomplete(referral_engine, missing_key):
+    result = evaluate(referral_engine, **{missing_key: None})
+    assert result.decision == "INCOMPLETE_SCREENING"
+    assert "MEASUREMENT_MISSING" in result.reason_codes
 
 
-# Test 08: NORMAL-LIKE + isolated K_HIGH, first reading -> REPEAT_REQUIRED
-def test_isolated_k_high_first_reading_repeat(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, HIGH_K_MEAS, repeat_count=1)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "K_HIGH" in od.reason_codes
-    assert "REPEAT_REQUIRED" in od.reason_codes
-    assert od.repeat_required is True
+def test_one_positive_eye_and_one_negative_eye_is_screen_positive(referral_engine):
+    od = evaluate(referral_engine, "OD", "SUSPICIOUS")
+    os = evaluate(referral_engine, "OS", "NORMAL_LIKE")
+    child = referral_engine.evaluate_child(od, os)
+    assert child.decision == "SCREEN_POSITIVE"
+    assert child.action == "REFER"
+    assert child.referral_priority == "PRIORITY_2"
+    assert child.affected_eyes == ["OD"]
 
 
-# Test 09: NORMAL-LIKE + isolated K_HIGH after repeat -> STANDARD_REFERRAL (no repeat flag)
-def test_isolated_k_high_after_repeat_standard(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, HIGH_K_MEAS, repeat_count=2)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "K_HIGH" in od.reason_codes
-    assert "REPEAT_REQUIRED" not in od.reason_codes
+def test_both_positive_eyes_are_listed(referral_engine):
+    od = evaluate(referral_engine, "OD", "SUSPICIOUS", k2_d=47.0)
+    os = evaluate(referral_engine, "OS", "NORMAL_LIKE", k2_d=47.0, pachymetry_um=470.0)
+    child = referral_engine.evaluate_child(od, os)
+    assert child.decision == "SCREEN_POSITIVE"
+    assert child.referral_priority == "PRIORITY_1"
+    assert child.affected_eyes == ["OD", "OS"]
 
 
-# Test 10: NORMAL-LIKE + isolated PACHY_LOW -> STANDARD_REFERRAL + REPEAT_REQUIRED
-def test_isolated_pachy_low_repeat_required(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, LOW_PACHY_MEAS, repeat_count=1)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "PACHY_LOW" in od.reason_codes
-    assert "REPEAT_REQUIRED" in od.reason_codes
+def test_indeterminate_eye_makes_child_repeat_required(referral_engine):
+    # An isolated keratometry value is the repeat case. An isolated cylinder is
+    # NOT: it refers on its own under the school-screening criteria.
+    od = evaluate(referral_engine, "OD", "NORMAL_LIKE", k2_d=48.0)
+    os = evaluate(referral_engine, "OS", "NORMAL_LIKE")
+    child = referral_engine.evaluate_child(od, os)
+    assert child.decision == "REPEAT_REQUIRED"
+    assert child.action == "REPEAT_MEASUREMENT"
 
 
-# Test 11: NORMAL-LIKE + isolated CYL_HIGH -> STANDARD_REFERRAL + REPEAT_REQUIRED
-def test_isolated_cyl_high_repeat_required(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, HIGH_CYL_MEAS, repeat_count=1)
-    assert od.decision == "STANDARD_REFERRAL"
-    assert "CYL_HIGH" in od.reason_codes
-    assert "REPEAT_REQUIRED" in od.reason_codes
+def test_incomplete_eye_overrides_completed_negative_child_result(referral_engine):
+    od = evaluate(referral_engine, "OD", "NORMAL_LIKE")
+    os = evaluate(referral_engine, "OS", "ANALYSIS_BLOCKED")
+    child = referral_engine.evaluate_child(od, os)
+    assert child.decision == "INCOMPLETE_SCREENING"
+    assert child.action == "INCOMPLETE"
 
 
-# Test 12: UNGRADABLE + all measurements normal -> RECAPTURE_REQUIRED (NOT SCREEN_NEGATIVE)
-def test_ungradable_normal_measurements_recapture(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_UNGRADABLE, NORMAL_MEAS)
-    assert od.decision == "RECAPTURE_REQUIRED"
-    assert od.decision != "SCREEN_NEGATIVE"
-    assert "IMG_UNGRADABLE" in od.reason_codes
+def test_codes_and_decisions_are_stable(referral_engine):
+    cases = [
+        evaluate(referral_engine, image_status="SUSPICIOUS", k2_d=47.0),
+        evaluate(referral_engine, image_status="NORMAL_LIKE", pachymetry_um=470.0),
+        evaluate(referral_engine, image_status="TRACKING_FAILED"),
+    ]
+    for case in cases:
+        assert case.decision in VALID_OUTPUT_CODES
+        assert set(case.reason_codes) <= VALID_REASON_CODES
 
 
-# Test 13: UNGRADABLE + K_HIGH -> RECAPTURE_REQUIRED
-def test_ungradable_k_high_recapture(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_UNGRADABLE, HIGH_K_MEAS)
-    assert od.decision == "RECAPTURE_REQUIRED"
-    assert "IMG_UNGRADABLE" in od.reason_codes
-    assert "K_HIGH" in od.reason_codes
+# ---------------------------------------------------------------------------
+# School-screening referral matrix (sensitivity-first OR rule)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "image_status,k2,pachymetry,cylinder,expected_action",
+    [
+        # A suspicious image refers on its own, whatever the measurements say.
+        ("SUSPICIOUS", 44.0, 530.0, 0.5, "REFER"),
+        ("SUSPICIOUS", 48.0, 470.0, 2.5, "REFER"),
+        # Normal image: two or more abnormal domains refer.
+        ("NORMAL_LIKE", 48.0, 470.0, 0.5, "REFER"),
+        ("NORMAL_LIKE", 48.0, 530.0, 2.5, "REFER"),
+        ("NORMAL_LIKE", 44.0, 470.0, 2.5, "REFER"),
+        # A raised cylinder alone is a standalone referral trigger.
+        ("NORMAL_LIKE", 44.0, 530.0, 2.5, "REFER"),
+        # An isolated K or pachymetry value is repeated, not referred.
+        ("NORMAL_LIKE", 48.0, 530.0, 0.5, "REPEAT_MEASUREMENT"),
+        ("NORMAL_LIKE", 44.0, 470.0, 0.5, "REPEAT_MEASUREMENT"),
+        # Nothing abnormal.
+        ("NORMAL_LIKE", 44.0, 530.0, 0.5, "NO_IMMEDIATE_REFERRAL"),
+        # An unusable image is never a negative.
+        ("TRACKING_FAILED", 44.0, 530.0, 0.5, "INCOMPLETE"),
+    ],
+)
+def test_school_screening_referral_matrix(referral_engine, image_status, k2, pachymetry, cylinder, expected_action):
+    result = referral_engine.evaluate_eye(
+        "OD",
+        image_status,
+        {"k1_d": 42.0, "k2_d": k2, "pachymetry_um": pachymetry, "cylinder_d": cylinder},
+        image_status=image_status,
+    )
+    assert result.action == expected_action
 
 
-# Test 14: Missing K2 -> INCOMPLETE + MEASUREMENT_MISSING
-def test_missing_k2_incomplete(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, MISSING_K2)
-    assert od.decision == "INCOMPLETE"
-    assert "MEASUREMENT_MISSING" in od.reason_codes
+def test_isolated_cylinder_refers_but_isolated_keratometry_repeats(referral_engine):
+    """The two isolated-abnormality cases must not be treated the same way."""
+    measurements = {"k1_d": 42.0, "k2_d": 44.0, "pachymetry_um": 530.0, "cylinder_d": 2.5}
+    cylinder_only = referral_engine.evaluate_eye("OD", "NORMAL_LIKE", measurements, image_status="NORMAL_LIKE")
+    assert cylinder_only.action == "REFER"
+    assert cylinder_only.decision == "SCREEN_POSITIVE_CYLINDER"
+
+    keratometry_only = referral_engine.evaluate_eye(
+        "OD", "NORMAL_LIKE",
+        {"k1_d": 42.0, "k2_d": 48.0, "pachymetry_um": 530.0, "cylinder_d": 0.5},
+        image_status="NORMAL_LIKE",
+    )
+    assert keratometry_only.action == "REPEAT_MEASUREMENT"
+    assert keratometry_only.repeat_required is True
 
 
-# Test 15: Missing pachymetry -> INCOMPLETE + MEASUREMENT_MISSING
-def test_missing_pachymetry_incomplete(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, MISSING_PACHY)
-    assert od.decision == "INCOMPLETE"
-    assert "MEASUREMENT_MISSING" in od.reason_codes
+def test_ungradable_image_does_not_suppress_a_measurement_based_referral(referral_engine):
+    """An unusable image must not hide a referral the measurements already justify."""
+    result = referral_engine.evaluate_eye(
+        "OD", "TRACKING_FAILED",
+        {"k1_d": 42.0, "k2_d": 49.0, "pachymetry_um": 470.0, "cylinder_d": 1.48},
+        image_status="TRACKING_FAILED",
+    )
+    assert result.action == "REFER"
+    assert result.repeat_required is True, "a repeat image should still be requested"
 
-
-# Test 16: OS normal, OD SUSPICIOUS -> child STANDARD_REFERRAL (either-eye rule)
-def test_either_eye_referral(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_SUSPICIOUS, NORMAL_MEAS)
-    os = referral_engine.evaluate_eye("OS", ENGINE_NORMAL, NORMAL_MEAS)
-    child = referral_engine.evaluate_child(od, os, NORMAL_MEAS, NORMAL_MEAS)
-    assert child.decision == "STANDARD_REFERRAL"
-
-
-# Test 17: OS PRIORITY_REFERRAL, OD SCREEN_NEGATIVE -> child PRIORITY_REFERRAL
-def test_priority_escalates_child(referral_engine):
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, NORMAL_MEAS)
-    os = referral_engine.evaluate_eye("OS", ENGINE_SUSPICIOUS, HIGH_K_MEAS)
-    child = referral_engine.evaluate_child(od, os, NORMAL_MEAS, HIGH_K_MEAS)
-    assert child.decision == "PRIORITY_REFERRAL"
-
-
-# Test 18: K2 OD-OS difference > 1.5D -> INTER_EYE_ASYMMETRY
-def test_inter_eye_asymmetry(referral_engine):
-    meas_od = dict(NORMAL_MEAS, k2_d=44.0)
-    meas_os = dict(NORMAL_MEAS, k2_d=46.0)  # diff = 2.0D > 1.5D threshold
-    od = referral_engine.evaluate_eye("OD", ENGINE_NORMAL, meas_od)
-    os = referral_engine.evaluate_eye("OS", ENGINE_NORMAL, meas_os)
-    child = referral_engine.evaluate_child(od, os, meas_od, meas_os)
-    assert child.inter_eye_asymmetry is True
-    assert "INTER_EYE_ASYMMETRY" in child.reason_codes
-
-
-# Test 19: UNGRADABLE is NEVER converted to SCREEN_NEGATIVE
-def test_ungradable_never_screen_negative(referral_engine):
-    for meas in [NORMAL_MEAS, HIGH_K_MEAS, LOW_PACHY_MEAS, MISSING_K2, MISSING_PACHY]:
-        result = referral_engine.evaluate_eye("OD", ENGINE_UNGRADABLE, meas)
-        assert result.decision != "SCREEN_NEGATIVE", (
-            f"UNGRADABLE returned SCREEN_NEGATIVE for measurements: {meas}"
-        )
-
-
-# Test 20: Conflicting repeat measurements (K2 diff > 0.5D)
-def test_conflicting_repeat_measurements():
-    from app.services.screening_service import ScreeningService
-    svc = ScreeningService()
-    r1 = {"k2_d": 44.0}
-    r2 = {"k2_d": 44.8}  # diff = 0.8D > threshold 0.5D
-    assert svc.check_measurement_agreement(r1, r2) is False
-
-
-# Test 21: All reason codes are from approved set
-def test_all_reason_codes_approved(referral_engine):
-    for meas in [NORMAL_MEAS, HIGH_K_MEAS, LOW_PACHY_MEAS, HIGH_CYL_MEAS, MISSING_K2]:
-        for engine_res in [ENGINE_NORMAL, ENGINE_SUSPICIOUS, ENGINE_UNGRADABLE]:
-            result = referral_engine.evaluate_eye("OD", engine_res, meas)
-            for code in result.reason_codes:
-                assert code in VALID_REASON_CODES, f"Invalid reason code: {code}"
-
-
-# Test 22: All output codes are from approved set
-def test_all_output_codes_approved(referral_engine):
-    for meas in [NORMAL_MEAS, HIGH_K_MEAS, MISSING_K2]:
-        for engine_res in [ENGINE_NORMAL, ENGINE_SUSPICIOUS, ENGINE_UNGRADABLE]:
-            result = referral_engine.evaluate_eye("OD", engine_res, meas)
-            assert result.decision in VALID_OUTPUT_CODES, f"Invalid output code: {result.decision}"
+    # One abnormal domain is not enough to refer without a gradable image, but it
+    # must never be reported as negative either.
+    single = referral_engine.evaluate_eye(
+        "OD", "TRACKING_FAILED",
+        {"k1_d": 42.0, "k2_d": 49.0, "pachymetry_um": 530.0, "cylinder_d": 0.5},
+        image_status="TRACKING_FAILED",
+    )
+    assert single.action == "INCOMPLETE"
+    assert single.decision != "SCREEN_NEGATIVE"

@@ -1,4 +1,5 @@
 """Page 7 — Search previous screenings."""
+import hashlib
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -67,9 +68,15 @@ else:
             rpt = ReportService()
             col_pdf, col_json, col_xlsx = st.columns(3)
             with col_pdf:
-                if st.button("Generate PDF", key="hist_pdf"):
+                if full.get("overall_action") != "REFER":
+                    st.info("No detailed referral PDF for this non-positive, repeat-required, or incomplete outcome.")
+                elif st.button("Generate Screen-Positive Referral PDF", key="hist_pdf"):
                     try:
                         p = rpt.generate_pdf(full, str(export_dir / f"{selected_id}.pdf"))
+                        with SessionLocal() as session:
+                            repo = ScreeningRepository(session)
+                            repo.record_referral_pdf(full["id"], p, hashlib.sha256(Path(p).read_bytes()).hexdigest())
+                            session.commit()
                         with open(p, "rb") as f:
                             st.download_button("⬇ PDF", f, file_name=f"{selected_id}.pdf", mime="application/pdf")
                     except Exception as e:

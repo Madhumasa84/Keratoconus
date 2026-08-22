@@ -6,7 +6,15 @@ import numpy as np
 import pytest
 from sklearn.dummy import DummyClassifier
 
-from kerascan.evaluation import EvaluationCase, grouped_bootstrap_ci, metric_summary, write_evaluation_outputs
+from kerascan.config import EngineConfig
+from kerascan.evaluation import (
+    EvaluationCase,
+    grouped_bootstrap_ci,
+    metric_summary,
+    screening_system_comparison,
+    target_assessment,
+    write_evaluation_outputs,
+)
 from kerascan.manifest import ManifestValidationError, assert_audit_passes, audit_manifest, load_manifest, validate_partition_leakage
 from kerascan.model_bundle import ModelBundle, ModelBundleError, load_model_bundle, save_model_bundle
 
@@ -70,6 +78,86 @@ def test_grouped_metrics_outputs_and_target_not_fabricated(tmp_path):
     assert "patient_id" not in Path(paths["aggregate_metrics_json"]).read_text()
 
 
+def test_evaluation_has_no_hard_coded_performance_claim():
+    assessment = target_assessment({"accuracy": 1.0, "sensitivity": 1.0})
+
+    assert assessment["target_accuracy"] is None
+    assert assessment["target_achieved"] == "NOT_ASSESSED"
+    assert assessment["screening_suitable_by_target"] == "NOT_DETERMINED"
+
+
+def test_screening_comparison_uses_injected_versioned_protocol(tmp_path):
+    import yaml
+
+    from app.services.referral_engine import ReferralEngine
+    from app.services.protocol import default_protocol_path
+
+    protocol = yaml.safe_load(default_protocol_path().read_text(encoding="utf-8"))
+    protocol.update(
+        protocol_version="test-nondefault-thresholds",
+        k2_abnormal_above_d=50.0,
+        pachymetry_abnormal_below_um=450.0,
+        cylinder_magnitude_abnormal_above_d=3.0,
+    )
+    protocol_path = tmp_path / "protocol.yaml"
+    protocol_path.write_text(yaml.safe_dump(protocol), encoding="utf-8")
+    engine = ReferralEngine(protocol_path)
+    cases = [
+        EvaluationCase(
+            "P1", "OD", "S1", "NORMAL", "NORMAL-LIKE", .1, [], "Unknown",
+            k1_d=43.0, k2_d=47.0, pachymetry_um=479.0, cylinder_d=2.0,
+        )
+    ]
+
+    comparison = screening_system_comparison(cases, referral_engine=engine)
+
+    assert comparison["protocol_version"] == "test-nondefault-thresholds"
+    assert comparison["thresholds"] == {
+        "k2_abnormal_above_d": 50.0,
+        "pachymetry_abnormal_below_um": 450.0,
+        "cylinder_magnitude_abnormal_above_d": 3.0,
+    }
+    assert comparison["measurement_rules"]["confusion_matrix"] == [[1, 0], [0, 0]]
+    assert comparison["combined_system"]["confusion_matrix"] == [[1, 0], [0, 0]]
+
+
+def test_screening_comparison_uses_complete_referral_matrix():
+    from app.services.referral_engine import ReferralEngine
+
+    cases = [
+        EvaluationCase(
+            "P1", "OD", "S1", "SUSPICIOUS", "SUSPICIOUS", .9, [], "Unknown",
+            k1_d=43.0, k2_d=44.0, pachymetry_um=520.0, cylinder_d=1.5,
+        ),
+        EvaluationCase(
+            "P2", "OD", "S1", "SUSPICIOUS", "NORMAL-LIKE", .2, [], "Unknown",
+            k1_d=43.0, k2_d=46.81, pachymetry_um=520.0, cylinder_d=1.5,
+        ),
+        EvaluationCase(
+            "P3", "OS", "S1", "SUSPICIOUS", "NORMAL-LIKE", .2, [], "Unknown",
+            k1_d=43.0, k2_d=46.81, pachymetry_um=479.0, cylinder_d=-1.5,
+        ),
+    ]
+
+    comparison = screening_system_comparison(cases, referral_engine=ReferralEngine())
+
+    # Suspicious image alone refers; a normal-like image with one abnormal
+    # domain remains indeterminate; two abnormal domains refer.
+    assert comparison["combined_outcomes"] == {
+        "SCREEN_POSITIVE_IMAGE_ONLY": 1,
+        "INDETERMINATE_SINGLE_PARAMETER": 1,
+        "DISCORDANT_SCREEN_POSITIVE": 1,
+    }
+    assert comparison["combined_system"]["gradable_classification_cases"] == 2
+    assert comparison["combined_system"]["ungradable_rate"] == pytest.approx(1 / 3)
+
+
+def test_installed_pipeline_version_is_not_duplicated_in_evaluation(tmp_path):
+    from kerascan.evaluate import installed_pipeline_version
+
+    assert installed_pipeline_version() == EngineConfig().pipeline_version
+
+
 def test_locked_command_requires_explicit_confirmation():
     from kerascan.evaluate_locked import main
     with pytest.raises(SystemExit) as failure:
@@ -84,11 +172,18 @@ def test_local_evaluation_writes_required_aggregate_files_and_stops_on_protocol_
     manifest=tmp_path/"evaluation.csv"; _manifest(manifest,[_row("P001","OD","S1",image,"UNGRADABLE")])
     estimator=DummyClassifier(strategy="prior").fit(np.zeros((2,len(FEATURE_ORDER))),[0,1])
     model=tmp_path/"model.joblib"
-    save_model_bundle(ModelBundle(estimator,FEATURE_ORDER,.55,"phase1-0.1.0","frozen",True,"development",protocol_version="3.0.0"),model)
+    save_model_bundle(ModelBundle(
+        estimator, FEATURE_ORDER, .55, EngineConfig().pipeline_version,
+        "frozen", True, "development",
+        protocol_version="kerascan-school-screening-provisional-1",
+    ), model)
     result=run_evaluation(str(manifest),str(model),str(tmp_path/"results"),bootstrap_iterations=5)
     assert Path(result["paths"]["aggregate_metrics_xlsx"]).exists()
     assert Path(result["paths"]["final_pdf"]).exists()
     bad=tmp_path/"bad_protocol.joblib"
-    save_model_bundle(ModelBundle(estimator,FEATURE_ORDER,.55,"phase1-0.1.0","bad",True,"development",protocol_version="mismatch"),bad)
+    save_model_bundle(ModelBundle(
+        estimator, FEATURE_ORDER, .55, EngineConfig().pipeline_version,
+        "bad", True, "development", protocol_version="mismatch",
+    ), bad)
     with pytest.raises(ModelBundleError,match="protocol"):
         run_evaluation(str(manifest),str(bad),str(tmp_path/"bad"),bootstrap_iterations=2)

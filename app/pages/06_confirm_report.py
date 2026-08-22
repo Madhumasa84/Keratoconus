@@ -1,131 +1,119 @@
-"""Page 6 — Operator confirmation, override, and export."""
-import sys
+"""Confirm outcome and expose only allowed local exports."""
+from __future__ import annotations
+
 import os
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import streamlit as st
-from datetime import datetime, timezone
 
-st.set_page_config(page_title="Confirm & Export — KERASCAN", layout="wide")
 from app.services.ui_security import require_authenticated
+
+st.set_page_config(page_title="Confirm & Export — KeraScan", layout="wide")
 require_authenticated(st)
-st.title("✅ Operator Confirmation & Export")
+st.title("Confirm & Export")
 
 result = st.session_state.get("analysis_result")
-if not result:
-    st.error("No analysis result. Complete analysis first.")
+if not result or not result.child_result:
+    st.error("No completed analysis result found. Run Analysis first.")
     st.stop()
 
 child = result.child_result
-st.subheader("Automated Decision Summary")
-if child:
-    st.info(f"**Overall:** {child.decision}  |  **Priority:** {child.referral_priority}")
-
-st.divider()
-tab_accept, tab_override = st.tabs(["Accept Decision", "Override Decision"])
-
-with tab_accept:
-    st.write("Accepting the automated decision. The result will be recorded as-is.")
-    if st.button("✓ Accept Automated Decision", type="primary", use_container_width=True):
-        st.session_state["decision_confirmed"] = True
-        st.session_state["override_data"] = None
-        st.success("Decision accepted and recorded.")
-
-with tab_override:
-    if st.session_state.get("operator_role") not in {"reviewer", "administrator"}:
-        st.info("A locally authenticated reviewer or administrator role is required for overrides.")
-    st.warning(
-        "**Overriding the automated decision is permanently recorded in the audit log and cannot be undone.** "
-        "The original automated decision is always preserved.",
-        icon="⚠️"
-    )
-    with st.form("override_form"):
-        confirm_op_id = st.text_input("Re-enter your Operator ID to confirm identity")
-        new_decision = st.selectbox("New Decision", [
-            "SCREEN_NEGATIVE", "STANDARD_REFERRAL", "PRIORITY_REFERRAL",
-            "RECAPTURE_REQUIRED", "INCOMPLETE", "MANUAL_REVIEW",
-        ])
-        override_reason = st.text_area(
-            "Mandatory override reason (min 20 characters)",
-            help="Provide detailed clinical justification for overriding the automated decision."
-        )
-        submitted = st.form_submit_button("Apply Override", use_container_width=True)
-
-    if submitted:
-        errors = []
-        if st.session_state.get("operator_role") not in {"reviewer", "administrator"}:
-            errors.append("Your local role is not permitted to override a decision.")
-        if confirm_op_id.strip() != st.session_state.get("operator_id", ""):
-            errors.append("Operator ID does not match. Please re-enter correctly.")
-        if len(override_reason.strip()) < 20:
-            errors.append("Override reason must be at least 20 characters.")
-        if child and new_decision == child.decision:
-            errors.append("New decision must differ from the automated decision.")
-        if errors:
-            for e in errors:
-                st.error(e)
-        else:
-            st.session_state["decision_confirmed"] = True
-            st.session_state["override_data"] = {
-                "user_identity": confirm_op_id,
-                "override_new": new_decision,
-                "override_reason": override_reason,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "original_decision": child.decision if child else "",
-            }
-            st.success(f"Override recorded: {child.decision if child else '?'} → {new_decision}")
-
-st.divider()
-st.subheader("Export Reports")
-if not st.session_state.get("decision_confirmed"):
-    st.info("Confirm or override the decision above before exporting.")
+if child.action == "REFER":
+    st.error(f"**Refer** — {', '.join(child.affected_eyes)}")
+elif child.decision == "REPEAT_REQUIRED":
+    st.warning("**Repeat measurement** before finishing.")
+elif child.decision == "INCOMPLETE_SCREENING":
+    st.warning("**Incomplete** — both eyes need a usable image and complete measurements.")
 else:
-    export_dir = Path(os.environ.get("KERASCAN_LOCAL_OUTPUT_DIR", str(Path.home() / ".kerascan" / "outputs"))) / result.screening_id
-    export_dir.mkdir(parents=True, exist_ok=True)
+    st.success("**No referral needed**")
 
-    try:
-        from app.database import SessionLocal
-        from app.database.repository import ScreeningRepository
-        from app.services.report_service import ReportService
+confirmed = st.checkbox("I have reviewed this result.", key="confirm_outcome")
+st.session_state["decision_confirmed"] = confirmed
+if not confirmed:
+    st.stop()
 
-        with SessionLocal() as session:
-            repo = ScreeningRepository(session)
-            full_data = repo.get_screening_full(result.screening_id) or {}
-    except Exception:
-        full_data = {"screening_id": result.screening_id}
+from app.database import SessionLocal
+from app.database.repository import ScreeningRepository
+from app.services.report_service import ReportService
+from app.services.screening_service import ScreeningService
 
-    report_svc = ReportService()
-    col_pdf, col_json, col_excel = st.columns(3)
+exports_root = Path(os.environ.get("KERASCAN_LOCAL_OUTPUT_DIR", str(Path.home() / ".kerascan" / "outputs")))
+output_dir = exports_root / result.screening_id
+output_dir.mkdir(parents=True, exist_ok=True)
+register_path = exports_root / "screening_register.xlsx"
+with SessionLocal() as session:
+    full_data = ScreeningRepository(session).get_screening_full(result.screening_id)
 
-    with col_pdf:
-        if st.button("📄 Generate PDF", use_container_width=True):
+if not full_data:
+    st.error("The local screening record is unavailable; no export can be generated.")
+    st.stop()
+
+report_service = ReportService()
+
+# Every confirmed screening lands in one cumulative register for the camp.
+# Re-confirming the same child updates that child's row rather than duplicating.
+try:
+    report_service.append_to_register(full_data, register_path)
+    st.caption(f"Added to the screening register ({register_path.name}).")
+except Exception as exc:  # pragma: no cover - surfaced to the operator
+    st.warning(f"Could not update the screening register: {exc}")
+pdf_col, data_col = st.columns(2)
+with pdf_col:
+    if child.action != "REFER":
+        st.caption("A referral letter is produced only when a referral is needed.")
+    elif st.button("Referral letter (PDF)", use_container_width=True, type="primary"):
+        try:
+            with SessionLocal() as session:
+                service = ScreeningService(db_session=session)
+                path = service.generate_referral_pdf(result, output_dir / f"{result.screening_id}-referral.pdf")
+            with open(path, "rb") as handle:
+                st.download_button("Download PDF", handle, file_name=Path(path).name, mime="application/pdf")
+        except Exception as exc:
+            st.error(f"Referral PDF error: {exc}")
+with data_col:
+    if st.button("Screening record (Excel)", use_container_width=True):
+        try:
+            path = report_service.generate_excel(full_data, str(output_dir / f"{result.screening_id}.xlsx"))
+            with open(path, "rb") as handle:
+                st.download_button("Download Excel", handle, file_name=Path(path).name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:
+            st.error(f"Excel error: {exc}")
+    with st.expander("Full data (JSON)"):
+        if st.button("Generate JSON", use_container_width=True):
             try:
-                with st.spinner("Generating PDF..."):
-                    path = report_svc.generate_pdf(full_data, str(export_dir / f"{result.screening_id}.pdf"))
-                st.success("PDF generated!")
-                with open(path, "rb") as f:
-                    st.download_button("⬇ Download PDF", f, file_name=f"{result.screening_id}.pdf", mime="application/pdf")
-            except Exception as e:
-                st.error(f"PDF error: {e}")
+                path = report_service.generate_json(full_data, str(output_dir / f"{result.screening_id}.json"))
+                with open(path, encoding="utf-8") as handle:
+                    st.download_button("Download JSON", handle.read(), file_name=Path(path).name, mime="application/json")
+            except Exception as exc:
+                st.error(f"JSON error: {exc}")
 
-    with col_json:
-        if st.button("📦 Generate JSON", use_container_width=True):
-            try:
-                path = report_svc.generate_json(full_data, str(export_dir / f"{result.screening_id}.json"))
-                st.success("JSON generated!")
-                with open(path) as f:
-                    st.download_button("⬇ Download JSON", f.read(), file_name=f"{result.screening_id}.json", mime="application/json")
-            except Exception as e:
-                st.error(f"JSON error: {e}")
-
-    with col_excel:
-        if st.button("📊 Generate Excel", use_container_width=True):
-            try:
-                path = report_svc.generate_excel(full_data, str(export_dir / f"{result.screening_id}.xlsx"))
-                st.success("Excel generated!")
-                with open(path, "rb") as f:
-                    st.download_button("⬇ Download Excel", f, file_name=f"{result.screening_id}.xlsx",
-                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except Exception as e:
-                st.error(f"Excel error: {e}")
+st.divider()
+register_col, next_col = st.columns(2)
+with register_col:
+    if register_path.exists():
+        with open(register_path, "rb") as handle:
+            st.download_button(
+                "Download screening register (all children)",
+                handle,
+                file_name=register_path.name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+with next_col:
+    if st.button("Screen another child →", use_container_width=True, type="primary"):
+        # Clear this child's screening but keep the operator logged in.
+        for key in (
+            "current_screening", "current_step", "analysis_result", "decision_confirmed",
+            "od_image_path", "os_image_path", "od_image_verification", "os_image_verification",
+            "od_measurements", "os_measurements", "od_measurements_r2", "os_measurements_r2",
+            "od_upload_content_hash", "os_upload_content_hash", "od_upload", "os_upload",
+            "confirm_outcome",
+        ):
+            st.session_state.pop(key, None)
+        for eye in ("OD", "OS"):
+            for field in ("k1", "k2", "pachymetry", "cylinder"):
+                st.session_state.pop(f"active_{field}_{eye}", None)
+        st.switch_page("pages/01_new_screening.py")
